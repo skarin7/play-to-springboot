@@ -56,16 +56,16 @@ This document defines the architecture for migrating **Play Framework (Java)** t
 
 | Step | What happens |
 |------|----------------|
-| **1. Parallel Spring project** | Setup (`./setup.sh <play-repo>`) creates **`spring-<basename>/`** next to the Play repo (directory layout). The **Builder** (per **builder skill**) generates **`pom.xml`**, **`Application.java`**, **`application.properties`** from `build.sbt` and `conf/application.conf`. Play and Spring stay **separate** — no mixing `build.sbt` with Maven in one tree. |
+| **1. Parallel Spring project** | Setup (`./scripts/setup.sh <play-repo>`) creates **`spring-<basename>/`** next to the Play repo (directory layout). The **Builder** (per **builder skill**) generates **`pom.xml`**, **`Application.java`**, **`application.properties`** from `build.sbt` and `conf/application.conf`. Play and Spring stay **separate** — no mixing `build.sbt` with Maven in one tree. |
 | **2. Run JAR to migrate Play → Spring** | From the **Play repo root** (where `dev-toolkit-1.0.0.jar` is copied by setup): **`java -jar dev-toolkit-1.0.0.jar migrate-app`** with optional **`--layer`** and **`--batch-size`**. Writes under **`<spring-repo>/src/main/java`**, preserving package paths. Idempotent: skips outputs that already exist. |
 | **3. Coordinate agents** | **Transformer** skill: (re)run **`migrate-app`** / **`transform`** for targeted files, manual Play→Spring fixes when the CLI leaves gaps. **Builder** skill: **`mvn compile`**, parse errors, fix Spring-only (imports, deps, signatures). |
 | **4. Loop** | Per layer (dependency order): migrate → compile → fix → update **`migration-status.json`** → next layer or next batch. Repeat until **`current_step: done`** or escalation (stuck errors). |
 
 No separate Python pipeline is required for this flow — the **orchestrator + skills + JAR + Maven** are the pipeline.
 
-### 2.1 Simplest trigger after `setup.sh` (Cursor)
+### 2.1 Simplest trigger after `scripts/setup.sh` (Cursor)
 
-1. **Open the right folder in Cursor** — the **Play repo** root, or a **multi-root workspace** that includes the Play repo and **`spring-<basename>`**. The agent must see **`<play-repo>/.cursor/skills/`** (created by `setup.sh`).
+1. **Open the right folder in Cursor** — the **Play repo** root, or a **multi-root workspace** that includes the Play repo and **`spring-<basename>`**. The agent must see **`<play-repo>/.cursor/skills/`** (created by `scripts/setup.sh`).
 2. **Start a new Agent chat** (Agent mode, not a quick inline edit).
 3. **Attach the orchestrator skill** — in the chat, use the **Skills** menu / `@` skills picker and choose **`play-spring-orchestrator`**. (Installed names are **`play-spring-orchestrator`**, **`play-spring-transformer`**, **`play-spring-builder`** — use **orchestrator** for the full autonomous loop.)
 4. **Paste one prompt** (copy as-is or adjust paths):
@@ -102,7 +102,7 @@ Open a **multi-root workspace** (Play + Spring) or a parent folder containing bo
 ```
 workspace/
 ├── <play-repo>/              ← Play app (READ-ONLY during migration)
-│   ├── dev-toolkit-1.0.0.jar ← copied here by setup.sh
+│   ├── dev-toolkit-1.0.0.jar ← copied here by scripts/setup.sh
 │   ├── app/
 │   ├── conf/
 │   ├── build.sbt
@@ -167,7 +167,7 @@ Single shaded JAR built from **java-dev-toolkit**; version pinned as **`dev-tool
 
 ### 6.1 Placement
 
-- Copied to **`<play-repo>/dev-toolkit-1.0.0.jar`** by **`setup.sh`** (from **`lib/dev-toolkit-1.0.0.jar`** in this kit).
+- Copied to **`<play-repo>/dev-toolkit-1.0.0.jar`** by **`scripts/setup.sh`** (from **`lib/dev-toolkit-1.0.0.jar`** in this kit).
 
 ### 6.2 Commands
 
@@ -236,7 +236,7 @@ If the CLI cannot safely transform something, the **Transformer** agent fixes it
 
 ## 8. Agent Skills (this kit)
 
-Skills ship under **`skills/`** and are copied into **`<play-repo>/.cursor/skills/`** by **`setup.sh`**.
+Skills ship under **`skills/`** and are copied into **`<play-repo>/.cursor/skills/`** by **`scripts/setup.sh`**.
 
 | Skill | Path | Role |
 |-------|------|------|
@@ -265,7 +265,7 @@ There is **no** requirement for separate **analyzer**, **validator**, or **QA** 
 
 ### Pre-flight
 
-- [ ] **`./setup.sh`** run; **`dev-toolkit-1.0.0.jar`** present at Play repo root.
+- [ ] **`./scripts/setup.sh`** run; **`dev-toolkit-1.0.0.jar`** present at Play repo root.
 - [ ] Spring project initialized (**`pom.xml`** compiles baseline).
 - [ ] **`migration-status.json`** present or created on first run.
 
@@ -295,7 +295,7 @@ Inspect **`migration-status.json`** and last **`mvn compile`** output.
 
 | Step | Action |
 |------|--------|
-| 1 | Run **`setup.sh`** + ensure **`lib/dev-toolkit-1.0.0.jar`** exists before setup copies it to the Play repo. |
+| 1 | Run **`scripts/setup.sh`** + ensure **`lib/dev-toolkit-1.0.0.jar`** exists before setup copies it to the Play repo. |
 | 2 | **Builder:** generate Spring scaffold + **`migration-status.json`** initial shape. |
 | 3 | **Orchestrator:** for each layer: **`migrate-app --layer …`** → **`mvn compile`** → fix → update status. |
 | 4 | Optional: **`mvn test`**, migrate tests, integration checks. |
@@ -336,7 +336,7 @@ Inspect **`migration-status.json`** and last **`mvn compile`** output.
 **Setup recap:**
 
 1. Build or obtain **`dev-toolkit-1.0.0.jar`** → **`lib/dev-toolkit-1.0.0.jar`**.
-2. Run **`./setup.sh /path/to/<play-repo>`** — creates **`spring-<basename>/`**, copies the JAR to **`<play-repo>/`**, populates **`<play-repo>/.cursor/`** (**`skills/`**, **`config/`**, **`docs/`**).
+2. Run **`./scripts/setup.sh /path/to/<play-repo>`** — creates **`spring-<basename>/`**, copies the JAR to **`<play-repo>/`**, populates **`<play-repo>/.cursor/`** (**`skills/`**, **`config/`**, **`docs/`**).
 3. Open the workspace; **tag the Orchestrator agent** with the **orchestrator skill** and follow **[§2](#2-assumed-autonomous-flow-orchestrator--skills--jar)**.
 
 **Do not** use a removed **`migrate.sh`** — migration is **`java -jar dev-toolkit-1.0.0.jar migrate-app`** from the Play repo root, coordinated by the orchestrator skill.

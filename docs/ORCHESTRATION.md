@@ -39,7 +39,7 @@ mvn -q package
 cp /path/to/java-dev-toolkit/target/dev-toolkit-1.0.0.jar /path/to/play-to-spring-kit/lib/
 
 cd /path/to/play-to-spring-kit
-./setup.sh /path/to/<play-repo>
+./scripts/setup.sh /path/to/<play-repo>
 ```
 
 Setup creates the Spring directory structure (no `pom.xml` or source files — the agent generates those).
@@ -117,6 +117,6 @@ The orchestrator maintains `<spring-repo>/migration-status.json` to track progre
 
 ## End-to-end checklist
 
-- [ ] **Phase 0:** Build dev-toolkit JAR; put in `play-to-spring-kit/lib/`; run `./setup.sh <play-repo>`.
+- [ ] **Phase 0:** Build dev-toolkit JAR; put in `play-to-spring-kit/lib/`; run `./scripts/setup.sh <play-repo>`.
 - [ ] **Phase 1:** Agent reads `build.sbt` + `application.conf` → generates `pom.xml`, `Application.java`, `application.properties`.
 - [ ] **Phase 2:** For each layer: `migrate-app --layer <layer>` → `mvn compile` → fix → repeat until clean → next layer.

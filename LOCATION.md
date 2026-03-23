@@ -8,13 +8,13 @@ This folder is the **Play-to-Spring Migration Kit**. It may live inside a Play r
 # From the parent of your Play repo
 cp -r <play-repo>/play-to-spring-kit .
 cd play-to-spring-kit
-./setup.sh ../<play-repo>
+./scripts/setup.sh ../<play-repo>
 ```
 
 Or clone/copy the kit to its own repo and run:
 
 ```bash
-./setup.sh /path/to/your-play-repo
+./scripts/setup.sh /path/to/your-play-repo
 ```
 
 That way the kit stays independent and works for any Play project; setup creates `spring-<basename>` and copies skills/metadata into the Play repo you pass.

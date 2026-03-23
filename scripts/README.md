@@ -2,17 +2,17 @@
 
 Python **stdlib-only** driver for the Play → Spring pipeline: `dev-toolkit` **`migrate-app`** per layer, **`mvn compile`**, optional **`cursor-agent`** for compile fixes, **`source_inventory`** / **`migration_verification`** counts.
 
-**State:** a single **`migration-status.json`** (no `pipeline_state.json`). Default path is **`<spring-repo>/migration-status.json`**, where **`spring-repo`** is resolved after **`setup.sh`** runs (see below). Override with `--status-file` or `MIGRATION_STATUS_FILE`.
+**State:** a single **`migration-status.json`** (no `pipeline_state.json`). Default path is **`<spring-repo>/migration-status.json`**, where **`spring-repo`** is resolved after **workspace preparation** (see below). Override with `--status-file` or `MIGRATION_STATUS_FILE`.
 
-**First step (automatic):** the script always runs **`play-to-spring-kit/setup.sh`** for **`--play-repo`** (idempotent: skills, JAR, **`workspace.yaml`**, Spring dirs). You do not run **`setup.sh`** manually first unless you prefer to.
+**First step (automatic):** each run **prepares the workspace** for **`--play-repo`**: Spring project directories, **`workspace.yaml`**, Cursor skills and kit files under **`<play-repo>/.cursor/`**, and copies **`dev-toolkit-1.0.0.jar`** from **`lib/`** into the play repo. This step is **idempotent**.
 
-**Where to run from:** use the kit clone as your shell cwd, e.g. **`cd …/play-to-spring-kit`**, then **`python3 scripts/migration_orchestrator.py --play-repo ../your-play-app`**. The kit root and **`setup.sh`** are found via the script file path (**`__file__`**), not cwd. Relative **`--play-repo`** / **`--workspace`** values are resolved against **cwd**, so paths like **`../cms-content-service`** are correct when you launch from the kit directory.
+**Where to run from:** use the kit clone as your shell cwd, e.g. **`cd …/play-to-spring-kit`**, then **`python3 scripts/migration_orchestrator.py --play-repo ../your-play-app`**. The kit root (bootstrap script, **`lib/`**) is found via the script file path (**`__file__`**), not cwd. Relative **`--play-repo`** / **`--workspace`** values are resolved against **cwd**, so paths like **`../cms-content-service`** are correct when you launch from the kit directory.
 
 ## Requirements
 
 - Python **3.10+**
 - **`java`**, **`mvn`** on `PATH`
-- **`dev-toolkit-1.0.0.jar`** at `<play-repo>/` (or pass `--jar`)
+- **`dev-toolkit-1.0.0.jar`** in **`play-to-spring-kit/lib/`** (copied to `<play-repo>/` during workspace prep, or pass `--jar`)
 - **`cursor-agent`** on `PATH` if using LLM fixes (see Cursor docs for install)
 
 ## Cursor / model
@@ -43,7 +43,7 @@ Optional: `CURSOR_AGENT_TIMEOUT_SEC` (default **1800**) per agent invocation.
 
 | Variable | Purpose |
 |----------|---------|
-| `PLAY_REPO` | Default `--play-repo` (same directory you pass to `setup.sh`) |
+| `PLAY_REPO` | Default `--play-repo` (Play project root) |
 | `SPRING_REPO` | Optional explicit Spring root (skips `workspace.yaml` / `spring-<basename>` resolution) |
 | `MIGRATION_STATUS_FILE` | Explicit status file path if set (only when `--status-file` is omitted) |
 | `CURSOR_API_KEY` | Required for `cursor-agent` (omit with `--no-cursor`) |
@@ -55,9 +55,9 @@ Optional: `CURSOR_AGENT_TIMEOUT_SEC` (default **1800**) per agent invocation.
 | `TIMEOUT_PER_LAYER_MINS` | Default 30 (wall clock per layer) |
 | `MAX_FILES_PER_CURSOR_SESSION` | Default 10 (batch errors by file) |
 
-## Paths (after automatic `setup.sh`)
+## Paths (after workspace preparation)
 
-Each run invokes **`setup.sh`** from the kit directory next to **`scripts/`** (same as running **`./setup.sh <play-repo>`** yourself). That writes **`workspace.yaml`** under the **workspace** directory (default: **parent of the play repo**) with absolute **`spring_repo`** and **`play_repo`**.
+Preparation writes **`workspace.yaml`** under the **workspace** directory (default: **parent of the play repo**) with absolute **`spring_repo`** and **`play_repo`**.
 
 The orchestrator then resolves:
 
@@ -65,11 +65,11 @@ The orchestrator then resolves:
 2. Else **`spring_repo`** from **`<workspace>/workspace.yaml`**.
 3. Else **`<workspace>/spring-<play-dir-name>`**, or **`<workspace>/<--spring-name>`** if you pass **`--spring-name`**.
 
-**`--workspace`** / **`--spring-name`** — only when you use a non-default layout; they are forwarded to **`setup.sh`** the same way as manual **`./setup.sh --workspace … --spring-name …`**.
+**`--workspace`** / **`--spring-name`** — only when you use a non-default layout; both are passed through to the same install step the script runs at the start.
 
 ## CLI usage
 
-Minimal (**only `--play-repo`**; **`setup.sh`** runs automatically). From inside the kit:
+Minimal (**only `--play-repo`**; workspace prep runs automatically). From inside the kit:
 
 ```bash
 cd /path/to/play-to-spring-kit
@@ -83,7 +83,7 @@ python3 /path/to/play-to-spring-kit/scripts/migration_orchestrator.py \
   --play-repo /path/to/cms-content-service
 ```
 
-Custom workspace / Spring folder name (forwarded to **`setup.sh`**):
+Custom workspace / Spring folder name:
 
 ```bash
 python3 scripts/migration_orchestrator.py \

@@ -3,9 +3,9 @@
 Autonomous Play → Spring migration orchestrator.
 Single state file: migration-status.json (see play-to-spring-kit skills).
 
-Only --play-repo is required (or PLAY_REPO): the script always runs play-to-spring-kit
-setup.sh first (idempotent), then resolves Spring repo from workspace.yaml or
-spring-<play-basename>.
+Only --play-repo is required (or PLAY_REPO): the script always runs the kit
+workspace bootstrap first (idempotent: skills, JAR, workspace.yaml, Spring dirs),
+then resolves Spring repo from workspace.yaml or spring-<play-basename>.
 
 Intended usage: cd into the kit clone (play-to-spring-kit) and run
 ``python3 scripts/migration_orchestrator.py --play-repo ../your-play-app``.
@@ -45,13 +45,18 @@ def abs_path(p: Path) -> Path:
     return p.expanduser().resolve(strict=False)
 
 
+def scripts_dir() -> Path:
+    """Directory containing this script and ``setup.sh``."""
+    return Path(__file__).resolve().parent
+
+
 def kit_root() -> Path:
-    """Directory containing setup.sh (play-to-spring-kit root)."""
-    return Path(__file__).resolve().parent.parent
+    """play-to-spring-kit root (``lib/``, ``skills/``, ``config/``, …)."""
+    return scripts_dir().parent
 
 
 def parse_workspace_yaml(yaml_path: Path) -> dict[str, str]:
-    """Minimal key: value reader for setup.sh-generated workspace.yaml (no PyYAML)."""
+    """Minimal key: value reader for kit-generated workspace.yaml (no PyYAML)."""
     out: dict[str, str] = {}
     if not yaml_path.is_file():
         return out
@@ -82,7 +87,7 @@ def resolve_spring_repo(
     spring_name: str | None,
 ) -> Path:
     """
-    Same layout as setup.sh: read workspace.yaml in workspace_dir, else
+    Same layout as kit bootstrap: read workspace.yaml in workspace_dir, else
     <workspace_dir>/spring-<play_basename> or <workspace_dir>/<spring_name>.
     """
     ws_yaml = workspace_dir / "workspace.yaml"
@@ -130,10 +135,10 @@ def run_setup_sh(
     spring_name: str | None,
     dry_run: bool,
 ) -> int:
-    """Run play-to-spring-kit setup.sh (idempotent). Called automatically at orchestrator start."""
-    setup_sh = kit_root() / "setup.sh"
+    """Run kit install/bootstrap (idempotent). Called automatically at orchestrator start."""
+    setup_sh = scripts_dir() / "setup.sh"
     if not setup_sh.is_file():
-        print(f"ERROR: setup.sh not found at {setup_sh}", file=sys.stderr)
+        print(f"ERROR: kit install script missing at {setup_sh}", file=sys.stderr)
         return 1
     # Always pass --workspace so setup and this script use the same directory (default = parent of play).
     cmd = [
@@ -614,7 +619,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Play → Spring migration orchestrator (migration-status.json only). "
-            "Runs setup.sh from the kit root first; only --play-repo is required."
+            "Runs kit workspace bootstrap first; only --play-repo is required."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
@@ -622,7 +627,7 @@ def main() -> int:
             "  cd path/to/play-to-spring-kit\n"
             "  python3 scripts/migration_orchestrator.py --play-repo ../my-play-app\n"
             "\n"
-            "setup.sh and lib/ are resolved from this script's location, not from cwd."
+            "Kit bootstrap and lib/ are resolved from this script's location, not from cwd."
         ),
     )
     pr = os.environ.get("PLAY_REPO")
@@ -631,7 +636,7 @@ def main() -> int:
         "--play-repo",
         type=Path,
         default=Path(pr) if pr else None,
-        help="Play project root (required unless PLAY_REPO). setup.sh runs for this path first.",
+        help="Play project root (required unless PLAY_REPO). Kit bootstrap runs for this path first.",
     )
     parser.add_argument(
         "--workspace",
