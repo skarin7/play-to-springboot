@@ -90,12 +90,12 @@ detect_base_package() {
 BASE_PACKAGE=$(detect_base_package "$PLAY_REPO/app" 2>/dev/null || echo "com.example.application")
 echo "Base package:  $BASE_PACKAGE"
 
-# Cursor uses <play-repo>/.cursor/ — keep everything there: skills/ (Agent) + config/ + docs/ reference.
-# Do not copy raw kit skills/*.md into .cursor/skills/; those paths are reserved for play-spring-*/SKILL.md below.
+# Kit reference lives under <play-repo>/.cursor/ for both editors to read.
+# Copy in place rather than rm -rf: this script runs on every orchestrator
+# invocation, and wiping the directory destroys notes the user added here.
 KIT_DEST="${PLAY_REPO}/.cursor"
 echo "Installing kit reference under $KIT_DEST (config/, docs/)"
 mkdir -p "$KIT_DEST"
-rm -rf "$KIT_DEST/config" "$KIT_DEST/docs"
 cp -r "$KIT_ROOT/config" "$KIT_DEST/"
 if [[ -d "$KIT_ROOT/docs" ]]; then
   cp -r "$KIT_ROOT/docs" "$KIT_DEST/"
@@ -145,68 +145,116 @@ kit_path: $KIT_DEST
 EOF
 echo "Wrote $WORKSPACE_YAML"
 
-# Progress is tracked by the orchestrator in <spring-repo>/migration-status.json (created on first agent run).
+# Progress is tracked by the manager in <spring-repo>/migration-status.json.
 
-# Optional placeholder route-map (no tooling required)
-ROUTE_MAP="${WORKSPACE_DIR}/route-map.json"
-if [[ ! -f "$ROUTE_MAP" ]]; then
-  echo '{"play_routes":[],"spring_endpoints":[]}' > "$ROUTE_MAP"
-  echo "Created $ROUTE_MAP"
+# Agent working directory: research.md, decisions.md, QA findings, and the
+# append-only dev journals that make a killed subagent resumable.
+mkdir -p "${SPRING_REPO}/.migration/journal"
+if [[ ! -f "${SPRING_REPO}/.gitignore" ]]; then
+  echo ".migration/" > "${SPRING_REPO}/.gitignore"
 fi
 
-# Copy skills into Play (source) repo in Cursor Agent format: .cursor/skills/<skill-name>/SKILL.md
-# So when the customer opens the Play repo in Cursor, the agent discovers these skills.
-CURSOR_SKILLS_ROOT="${PLAY_REPO}/.cursor/skills"
-echo "Installing Cursor Agent skills into $CURSOR_SKILLS_ROOT"
-mkdir -p "$CURSOR_SKILLS_ROOT"
+# Route map, populated from conf/routes rather than left as an empty stub.
+# This is the baseline QA's T3 parity check compares Spring mappings against.
+ROUTE_MAP="${WORKSPACE_DIR}/route-map.json"
+if [[ -f "${PLAY_REPO}/conf/routes" ]]; then
+  if python3 "$KIT_ROOT/scripts/tools/routes.py" \
+        --routes-file "${PLAY_REPO}/conf/routes" \
+        --spring-src "${SPRING_REPO}/src/main/java" > "$ROUTE_MAP" 2>/dev/null; then
+    route_count=$(python3 -c "import json;print(len(json.load(open('$ROUTE_MAP'))['play_routes']))" 2>/dev/null || echo "?")
+    echo "Wrote $ROUTE_MAP ($route_count Play routes)"
+  else
+    echo '{"play_routes":[],"spring_endpoints":[]}' > "$ROUTE_MAP"
+    echo "Could not parse conf/routes; wrote empty $ROUTE_MAP" >&2
+  fi
+elif [[ ! -f "$ROUTE_MAP" ]]; then
+  echo '{"play_routes":[],"spring_endpoints":[]}' > "$ROUTE_MAP"
+  echo "No conf/routes found; created empty $ROUTE_MAP"
+fi
 
-skill_descriptions() {
-  case "$1" in
-    transformer-skill) echo "Transform Play Framework Java files to Spring Boot. Use when migrating controllers, services, or any Play class." ;;
-    builder-skill)     echo "Compile Spring project and fix errors until build passes. Use after transforming files." ;;
-    orchestrator-skill) echo "Run the full migration: Transform (CLI) then Validation (compile + fix until clean)." ;;
-    *)                echo "Play-to-Spring migration skill." ;;
-  esac
-}
+# The Spring project needs to be a git repo so the manager can commit after each
+# layer passes QA -- that is what gives a rejected review gate something to reset
+# to, instead of a manual unwind.
+MIGRATION_BRANCH="migration/${PLAY_BASENAME}"
+if [[ ! -d "${SPRING_REPO}/.git" ]]; then
+  git -C "$SPRING_REPO" init -q
+  git -C "$SPRING_REPO" checkout -q -b "$MIGRATION_BRANCH" 2>/dev/null || true
+  echo "Initialized git in $SPRING_REPO on branch $MIGRATION_BRANCH"
+else
+  current=$(git -C "$SPRING_REPO" branch --show-current 2>/dev/null || echo "")
+  echo "Spring repo already under git (branch: ${current:-detached})"
+fi
+
+# Install skills for both editors: <play-repo>/.claude/skills/<name>/SKILL.md and
+# the same content under .cursor/skills/.
+#
+# The source files in kit skills/ already carry valid YAML frontmatter, so they
+# are copied through verbatim. The previous version emitted its own
+# ---name/description--- header and then cat'd a file that started with its own
+# ---, producing two frontmatter blocks in every installed SKILL.md.
+CLAUDE_SKILLS_ROOT="${PLAY_REPO}/.claude/skills"
+CURSOR_SKILLS_ROOT="${PLAY_REPO}/.cursor/skills"
+echo "Installing agent skills"
+mkdir -p "$CLAUDE_SKILLS_ROOT" "$CURSOR_SKILLS_ROOT"
 
 for skill_md in "$KIT_ROOT/skills"/*.md; do
   [[ -f "$skill_md" ]] || continue
   base=$(basename "$skill_md" .md)
-  # skill name: transformer-skill -> play-spring-transformer (Cursor: lowercase, hyphens)
-  name="play-spring-${base%-skill}"
-  desc=$(skill_descriptions "$base")
-  skill_dir="${CURSOR_SKILLS_ROOT}/${name}"
-  mkdir -p "$skill_dir"
-  {
-    echo "---"
-    echo "name: $name"
-    echo "description: $desc"
-    echo "---"
-    echo ""
-    cat "$skill_md"
-  } > "$skill_dir/SKILL.md"
+  if [[ "$base" == play-spring-* ]]; then
+    name="$base"
+  else
+    name="play-spring-${base%-skill}"   # legacy: transformer-skill -> play-spring-transformer
+  fi
+  if ! head -1 "$skill_md" | grep -q '^---$'; then
+    echo "  WARNING: $base has no frontmatter; skipping" >&2
+    continue
+  fi
+  for root in "$CLAUDE_SKILLS_ROOT" "$CURSOR_SKILLS_ROOT"; do
+    mkdir -p "${root}/${name}"
+    cp "$skill_md" "${root}/${name}/SKILL.md"
+  done
   echo "  $name"
 done
+
+# Claude Code subagent definitions. These carry the tool grants that make role
+# boundaries mechanical rather than advisory: only play-spring-dev gets Edit and
+# Write. Cursor has no subagent isolation, so it gets the skills only -- see
+# docs/STATE-CONTRACT.md for what that path gives up.
+if [[ -d "$KIT_ROOT/agents" ]]; then
+  CLAUDE_AGENTS_ROOT="${PLAY_REPO}/.claude/agents"
+  echo "Installing Claude Code subagents into $CLAUDE_AGENTS_ROOT"
+  mkdir -p "$CLAUDE_AGENTS_ROOT"
+  for agent_md in "$KIT_ROOT/agents"/*.md; do
+    [[ -f "$agent_md" ]] || continue
+    cp "$agent_md" "$CLAUDE_AGENTS_ROOT/"
+    echo "  $(basename "$agent_md" .md)"
+  done
+fi
 
 echo ""
 echo "=== Setup complete ==="
 echo ""
-echo "  Workspace:       $WORKSPACE_DIR"
-echo "  Play repo:      $PLAY_REPO"
+echo "  Workspace:      $WORKSPACE_DIR"
+echo "  Play repo:      $PLAY_REPO  (READ-ONLY during migration)"
 echo "  Spring project: $SPRING_REPO"
-echo "  Cursor / kit:     $KIT_DEST (skills/ + config/ + docs/)"
-echo "  Agent state:    $SPRING_REPO/migration-status.json (created by orchestrator)"
+echo "  Kit reference:  $KIT_DEST (config/, docs/)"
+echo "  Agent state:    $SPRING_REPO/migration-status.json (created by the manager)"
+echo "  Agent scratch:  $SPRING_REPO/.migration/ (research, decisions, findings, journals)"
 echo ""
-echo "Cursor Agent skills: $PLAY_REPO/.cursor/skills/"
-echo "  (Open the Play repo or workspace in Cursor; Agent will discover play-spring-* skills.)"
+echo "Claude Code:  $PLAY_REPO/.claude/skills/ + .claude/agents/   <- role isolation enforced"
+echo "Cursor:       $PLAY_REPO/.cursor/skills/                     <- skills only, no subagents"
 if [[ -d "$KIT_ROOT/lib" ]] && [[ -n "$(find "$KIT_ROOT/lib" -maxdepth 1 -name '*.jar' 2>/dev/null)" ]]; then
   echo "dev-toolkit JAR copied to: $PLAY_REPO/dev-toolkit-1.0.0.jar"
-  echo "  (From Play repo: java -jar dev-toolkit-1.0.0.jar migrate-app)"
 fi
 echo ""
 echo "Next steps:"
-echo "  1. Open $WORKSPACE_DIR (or $PLAY_REPO) in Cursor so Agent sees .cursor/skills/"
-echo "  2. Autonomous run: Cursor Agent + skill play-spring-orchestrator + one-liner (see docs/play_to_spring_migration.md §2.1)."
-echo "  3. Manual CLI only: cd $PLAY_REPO && java -jar dev-toolkit-1.0.0.jar migrate-app"
-echo "  4. Spring build: cd $SPRING_REPO && mvn compile"
+echo "  1. Open $PLAY_REPO in Claude Code."
+echo "  2. Invoke the play-spring-manager skill:"
+echo "       \"Run the play-spring-manager skill for this workspace; resume from"
+echo "        migration-status.json if present.\""
+echo "  3. The manager stops at Gate 1 with the architect's decisions for your review."
+echo ""
+echo "Deterministic helpers (run these yourself any time):"
+echo "  python3 $KIT_ROOT/scripts/tools/inventory.py --play-repo $PLAY_REPO"
+echo "  python3 $KIT_ROOT/scripts/tools/verify.py --play-repo $PLAY_REPO --spring-repo $SPRING_REPO"
 echo ""

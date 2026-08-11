@@ -1,142 +1,146 @@
 # Play-to-Spring Migration Kit
 
-**Independent, reusable** kit to migrate any **Play Framework (Java)** repo to **Spring Boot**.
+Migrate a **Play Framework (Java)** repo to **Spring Boot** using five agent
+roles coordinated through shared state, with human review gates.
 
-- **`scripts/migration_orchestrator.py`** is the usual entry point: it **prepares the workspace** for your Play repo (Spring layout, Cursor skills, dev-toolkit JAR copy, **`workspace.yaml`**), then drives **layered `migrate-app` + `mvn compile`**, with optional headless **`cursor-agent`** for compile fixes. Details: **[scripts/README.md](scripts/README.md)**.
-- **LLM/agent** initializes the Spring project (`pom.xml`, `Application.java`, `application.properties`) by reading the Play project.
-- **CLI** does ~70% deterministic migration; **LLM/agent** fixes the rest until the build is clean.
+Deterministic work is done by tools; judgment is done by agents; sequencing lives
+in skill documents rather than in orchestration code.
+
+## How it works
+
+| Role | Writes code | Job |
+|---|---|---|
+| **manager** | no | Owns state, sequences layers, dispatches subagents, enforces gates, commits |
+| **researcher** | no | Surveys the Play repo before anything is built |
+| **architect** | no | Decides the dependency, config, and idiom mapping — before dev starts |
+| **dev** | **yes** | Runs the transformer, fixes compile errors. The only role that writes source |
+| **qa** | no | Verifies across four tiers, emits findings, never fixes |
+
+```
+manager → researcher → architect ──── GATE 1 (you approve the approach)
+                                        ↓
+   dev writes pom/Application → QA compiles the EMPTY project (dependency check)
+                                        ↓
+   per layer:  dev → qa ──findings──┐   model → repository → manager
+                 ↑─────────────────┘    → service → controller → other
+               passes → commit → GATE 2 after the first layer
+                                        ↓
+              final QA (T1-T4) ──── GATE 4 (you approve the merge)
+```
+
+Sequential by design: the layer dependency order is real, and QA on
+half-migrated code is noise.
+
+### Why the roles are split this way
+
+- The **researcher** runs first because the standard failure of coding agents is
+  confident output that ignores how the codebase actually works.
+- The **architect** gate exists because a wrong `pom.xml` is not one bug — it is
+  the same bug in every layer, found one layer at a time.
+- **QA never fixes**, because an agent that fixes what it checks stops finding
+  things. It re-runs the build itself rather than trusting dev's report.
 
 ## Quick start
 
-### 1. Build the dev-toolkit JAR (one time)
-
 ```bash
-cd /path/to/java-dev-toolkit
-mvn -q package
-cp target/dev-toolkit-1.0.0.jar /path/to/play-to-spring-kit/lib/
-```
-
-### 2. Run the migration orchestrator (recommended)
-
-From **this kit** directory:
-
-```bash
+# 1. Prepare the workspace (idempotent; safe to re-run)
 cd /path/to/play-to-spring-kit
-python3 scripts/migration_orchestrator.py --play-repo /path/to/<play-repo>
-# or relative:  --play-repo ../<play-repo>
+python3 scripts/migration_orchestrator.py setup --play-repo ../your-play-app
+
+# 2. Open the Play repo in Claude Code and invoke the manager skill
+#    "Run the play-spring-manager skill for this workspace;
+#     resume from migration-status.json if present."
 ```
 
-- **Requires:** Python **3.10+**, **`java`** / **`mvn`** on `PATH`; **`cursor-agent`** on `PATH` only if you use API-key mode (see **[scripts/README.md](scripts/README.md)**).
-- **`migration-status.json`** must exist under the Spring repo with **`initialize.status: done`** once the builder has generated the Spring scaffold; otherwise the script exits **3** (same gate as the Cursor orchestrator skill).
+The manager stops at Gate 1 with the architect's decisions for your review.
 
-### 3. Alternative — manual CLI + Cursor skills (no Python)
+**Requirements:** Java 17+, Maven, Python 3.10+, and
+`dev-toolkit-1.0.0.jar` in `lib/`.
 
-If you are **not** using **`migration_orchestrator.py`**, install the kit into the play repo once from the kit directory (the same step the orchestrator performs automatically), then use the JAR and skills:
+## QA tiers
+
+The check that matters most is T2. A file can compile, keep every method, and
+still have had its body replaced with `return null` — file counting scores that
+as success.
+
+| Tier | What | When |
+|---|---|---|
+| **T1** compile | `mvn compile` exits 0 | every layer |
+| **T2** structural preservation | signature diff Play vs Spring | every layer |
+| **T3** route parity | `conf/routes` vs Spring mappings | after `controller`, and final |
+| **T4** tests | `mvn test` | final |
+
+T2 reports exactly two things — a public method that disappeared, and a method
+body that collapsed to near-nothing. The narrowness is deliberate: migration
+legitimately rewrites bodies, and blocker-severity false positives teach the
+reviewer to wave findings through.
+
+## Deterministic helpers
+
+Agents call these; so can you. All print JSON to stdout.
+
+| Tool | Purpose |
+|---|---|
+| `scripts/tools/inventory.py` | Per-layer file counts, both trees; picks role mode |
+| `scripts/tools/verify.py` | Completeness + T3 route parity |
+| `scripts/tools/signature_diff.py` | T2 structural preservation |
+| `scripts/tools/parse_mvn.py` | Maven log → structured errors |
+| `scripts/tools/state.py` | Atomic single-writer state access |
+| `scripts/tools/routes.py` | Play routes / Spring mappings extraction |
 
 ```bash
-cd /path/to/play-to-spring-kit
-./scripts/setup.sh /path/to/<play-repo>
+python3 scripts/tools/test_tools.py    # 52 tests, stdlib only
 ```
 
-That creates **`spring-<basename>`**, copies **`dev-toolkit-1.0.0.jar`**, installs **`<play-repo>/.cursor/skills/`** and **`config/`** / **`docs/`**, and writes **`workspace.yaml`**. **Progress** lives in **`<spring-repo>/migration-status.json`** (orchestrator agent or Python script — not created by the install step alone).
-
-Then from the **Play repo**:
-
-```bash
-cd /path/to/<play-repo>
-java -jar dev-toolkit-1.0.0.jar migrate-app
-```
-
-Defaults: source = `.`, target = `../spring-<basename>`.
-
-### 4. Build until clean
-
-```bash
-cd ../spring-<basename> && mvn compile
-```
-
-Fix errors, re-run `mvn compile`, repeat until it passes. Use the **Builder** and **Transformer** skills in Cursor to automate this.
-
-## Python autonomous orchestrator (CLI)
-
-Full flags, env vars (`CURSOR_API_KEY`, model overrides, guardrails), exit codes, and overnight **`nohup`** examples: **[scripts/README.md](scripts/README.md)**.
-
-Summary:
-
-- **Only `--play-repo`** is required (absolute or relative to your shell cwd); **workspace preparation runs on every invocation** (idempotent).
-- Spring repo and default **`migration-status.json`** come from **`workspace.yaml`** or **`spring-<play-basename>`**.
-- Prefer **`cd play-to-spring-kit`** then **`python3 scripts/migration_orchestrator.py --play-repo ../your-play-app`** so relative play paths match your tree; kit paths are resolved from the script location, not cwd.
-
-## Architecture & autonomous pipeline
-
-See **[docs/play_to_spring_migration.md](docs/play_to_spring_migration.md)** for the full architecture: orchestrator + skills + **`dev-toolkit-1.0.0.jar`**, state file, layer order, and failure handling.
-
-**Autonomous options:**
-
-1. **Cursor** — open the Play repo → **Agent** → skill **`play-spring-orchestrator`** → e.g. *“Execute the full play-spring-orchestrator migration loop… resume from migration-status.json if present.”* (**§2.1** in that doc.)
-2. **Python CLI** — **`scripts/migration_orchestrator.py`** (this repo), same state file and layer order; optional **`cursor-agent`** for compile fixes.
-
-## Orchestration (Cursor agent flow)
-
-See **[docs/ORCHESTRATION.md](docs/ORCHESTRATION.md)** for the step-by-step guide.
-
-One **orchestrator agent** runs three steps:
-
-1. **Initialize:** Read `build.sbt` + `application.conf` → generate `pom.xml`, `Application.java`, `application.properties` in the Spring repo.
-2. **Transform:** `java -jar dev-toolkit-1.0.0.jar migrate-app` (from Play repo).
-3. **Validate:** `cd ../spring-<basename> && mvn compile`; fix all errors; repeat until success.
-
-All commands are in the skills; the agent runs CLI directly.
-
-## Requirements
-
-- **Bash** (only if you run **`./scripts/setup.sh`** manually instead of relying on **`migration_orchestrator.py`**)
-- **Maven** (for the Spring project)
-- **Java 17+** (for Spring Boot 3 and the dev-toolkit JAR)
-- **Python 3.10+** (for **`scripts/migration_orchestrator.py`**)
-- **`cursor-agent`** on `PATH` (only if you use API-key mode with the Python orchestrator; see **[scripts/README.md](scripts/README.md)**)
-
-## Layout after workspace preparation
+## Layout after setup
 
 ```
-play-to-spring-kit/                   # This kit (clone)
-├── lib/                              # Place dev-toolkit-1.0.0.jar here
-├── scripts/
-│   ├── setup.sh                      # Manual kit install (optional; orchestrator runs it automatically)
-│   ├── migration_orchestrator.py    # Recommended: bootstrap + layered migrate + compile
-│   └── README.md
-├── skills/                           # Source skill markdown (copied into play .cursor/skills/)
-└── docs/
+play-to-spring-kit/
+├── lib/dev-toolkit-1.0.0.jar
+├── skills/play-spring-{manager,researcher,architect,dev,qa}.md
+├── agents/play-spring-{researcher,architect,dev,qa}.md   # tool grants
+├── scripts/{setup.sh,migration_orchestrator.py,tools/}
+└── docs/{STATE-CONTRACT.md,ORCHESTRATION.md,play_to_spring_migration.md}
 
-workspace/                            # Default: parent of <play-repo>
-├── <play-repo>/                      # Your Play repo
-│   ├── dev-toolkit-1.0.0.jar         # Copied during workspace prep
-│   └── .cursor/                      # Cursor + kit reference
-│       ├── skills/                   # Agent skills (play-spring-*)
-│       ├── config/                   # e.g. workspace.example.yaml
-│       └── docs/                     # ORCHESTRATION, play_to_spring_migration, …
-├── spring-<basename>/                # Spring Boot project (layout from prep; pom etc. by agent)
-│   ├── migration-status.json         # Resumable state (orchestrator agent or Python script)
-│   ├── src/main/java/
-│   ├── src/main/resources/
-│   ├── src/test/java/
-│   └── src/test/resources/
+workspace/
+├── <play-repo>/                   # READ-ONLY during migration
+│   ├── dev-toolkit-1.0.0.jar
+│   ├── .claude/{skills,agents}/   # role isolation enforced here
+│   └── .cursor/skills/            # skills only — see caveat below
+├── spring-<basename>/
+│   ├── migration-status.json      # single source of truth
+│   ├── .migration/                # research.md, decisions.md, findings, journals
+│   └── src/main/java/
 ├── workspace.yaml
-└── route-map.json                    # Optional placeholder
+└── route-map.json                 # populated from conf/routes
 ```
 
-## Cursor Agent skills
+## Claude Code vs Cursor
 
-After workspace preparation, skills live under `<play-repo>/.cursor/skills/` so Cursor discovers them:
+Role boundaries are enforced by subagent tool grants: only `play-spring-dev` has
+`Edit`/`Write`. **Cursor has no subagent isolation**, so there the roles are
+advisory prose and one agent plays all of them, marking its own homework.
 
-- **play-spring-orchestrator** — the single entry point: Initialize → Transform → Validate.
-- **play-spring-transformer** — run dev-toolkit CLI to migrate classes.
-- **play-spring-builder** — initialize Spring project (pom.xml, Application.java, application.properties) + compile + fix loop.
+The kit installs to both, but the Cursor path is degraded. On it, the
+`git -C <play-repo> status --porcelain` guard and script-owned verification are
+mandatory rather than belt-and-braces.
 
-## Using the kit on another repo
+## State and resumability
 
-1. Copy the **play-to-spring-kit** folder (or clone it).
-2. Put `dev-toolkit-1.0.0.jar` in `play-to-spring-kit/lib/`.
-3. **Recommended:** `cd play-to-spring-kit && python3 scripts/migration_orchestrator.py --play-repo <path-to-play-repo>` — see **[scripts/README.md](scripts/README.md)**.
-4. **Or** manual install + JAR: from the kit directory `./scripts/setup.sh <path-to-play-repo>`, then from the Play repo `java -jar dev-toolkit-1.0.0.jar migrate-app`, then `cd ../spring-<basename> && mvn compile`.
-5. Use Cursor skills as needed for init / fixes.
+`migration-status.json` is written **only by the manager**. Subagents report
+through artifacts under `.migration/` and through append-only journals, which is
+what lets a killed subagent be resumed rather than restarted.
+
+Re-running is always safe: completed layers are skipped, and the transformer
+skips files that already exist in the target.
+
+Full schema, handoff rules, and gate semantics: **[docs/STATE-CONTRACT.md](docs/STATE-CONTRACT.md)**.
+
+## Notes
+
+- `scripts/migration_orchestrator.py` no longer orchestrates. It does workspace
+  setup and status reporting. Sequencing, model choice, and failure handling
+  belong to the agent now.
+- If `inventory.py` reports `stale_jar_warnings`, the `dev-toolkit-1.0.0.jar` in
+  your Play repo predates the LayerDetector segment-matching fix and will migrate
+  those files in the wrong layer. Refresh it from `lib/`.
