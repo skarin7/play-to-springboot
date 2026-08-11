@@ -87,6 +87,7 @@ Agents call these; so can you. All print JSON to stdout.
 | `scripts/tools/parse_mvn.py` | Maven log → structured errors |
 | `scripts/tools/state.py` | Atomic single-writer state access |
 | `scripts/tools/routes.py` | Play routes / Spring mappings extraction |
+| `scripts/tools/token_report.py` | Measured token and cost accounting per run |
 
 ```bash
 python3 scripts/tools/test_tools.py    # 52 tests, stdlib only

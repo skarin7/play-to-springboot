@@ -62,6 +62,7 @@ Each prints JSON to stdout and does one thing.
 | `routes.py` | Play routes and Spring mappings; path normalization |
 | `verify.py` | Completeness plus **T3** route parity |
 | `state.py` | Atomic single-writer access to `migration-status.json` |
+| `token_report.py` | Measured token/cost accounting from Claude Code transcripts |
 
 ```bash
 python3 scripts/tools/test_tools.py     # 52 tests, stdlib only
