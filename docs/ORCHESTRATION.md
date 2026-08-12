@@ -20,6 +20,12 @@ This creates `spring-<basename>/`, copies the JAR into the Play repo, installs
 `workspace.yaml`, seeds `route-map.json` from `conf/routes`, creates
 `.migration/journal/`, and puts the Spring repo on a `migration/<name>` branch.
 
+**Re-run setup after updating the kit.** The skills and agents installed under
+`<play-repo>/.claude/` are copies taken at setup time; they do not track later
+edits to the kit, and nothing warns you that they have drifted. Setup overwrites
+them, and re-running is safe — it preserves your own files under `.cursor/docs/`
+and any custom agents you added.
+
 Check the inventory before starting:
 
 ```bash

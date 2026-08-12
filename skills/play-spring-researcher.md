@@ -31,11 +31,9 @@ The manager already ran `scripts/tools/inventory.py`; read its output rather tha
 recounting. Note anything surprising: layers with zero files, a Java root that is
 not `app/`, generated sources.
 
-**Check `toolkit_jar.status`.** `stale` means the dev-toolkit JAR in the Play
-repo predates the LayerDetector fix and will place the listed files in the wrong
-layer — a flat `app/controllers/` directory classified as `other`, migrated last,
-with no `@RestController`. Flag it prominently; the human needs to see this at
-Gate 1. `current` needs no mention.
+Toolchain health is not your concern — the manager checks the dev-toolkit JAR
+before dispatching you, and will not have got this far with a bad one. Spend your
+effort on the code.
 
 ### 2. Build dependencies — `build.sbt`
 
@@ -82,7 +80,7 @@ of layer, because everything depends on them.
 # Research: <play-repo>
 
 ## Inventory
-<counts per layer; anomalies; stale-JAR warning if any>
+<counts per layer; anomalies worth the architect's attention>
 
 ## Dependencies (build.sbt)
 | Play dependency | Version | Spring equivalent | Confidence |
