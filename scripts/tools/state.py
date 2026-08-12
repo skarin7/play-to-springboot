@@ -99,6 +99,9 @@ def merge_status(raw: dict[str, Any]) -> dict[str, Any]:
 
     out.setdefault("source_inventory", None)
     out.setdefault("migration_verification", None)
+    # T5. None rather than {} so an unrun endpoint check is distinguishable from
+    # one that ran and found nothing.
+    out.setdefault("endpoint_verification", None)
     return out
 
 

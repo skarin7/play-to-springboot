@@ -20,6 +20,51 @@ Subagents report through three channels instead:
 | **Journal** | append-only NDJSON in `.migration/journal/` | dev | Crash recovery |
 | **Return summary** | text back to the manager | all | What the manager acts on |
 
+## Who verifies what
+
+The four scripted tiers are deterministic — a subprocess call and a comparison —
+so they are the manager's own work, not an agent's:
+
+| Tier | Runs | Who |
+|---|---|---|
+| **T1** compile | `mvn compile` → `parse_mvn.py` | dev while fixing; the manager again via `gate.py` |
+| **T2** preservation | `signature_diff.py` | manager, `gate.py` |
+| **T3** route parity | `routes.py` / `verify.py` | manager, `gate.py` |
+| **T4** tests | `mvn test` | manager, `gate.py --final` |
+| **T5** endpoint parity | `endpoint_diff.py`, both apps booted | **QA agent** |
+
+`scripts/tools/gate.py` runs T1–T4 in one call and prints a single verdict. Raw
+Maven output goes to `.migration/logs/`; only the parsed summary reaches stdout,
+which is what lets the manager own the check without breaking the invariant
+below.
+
+**Dev owns the compile.** It runs `mvn compile` and fixes until the build is
+clean or it has an honest blocker. The manager re-runs T1 in the gate regardless
+— dev's report is a claim, the re-run is evidence. Dev compiling first is not a
+substitute for the gate; it is what stops the gate being dev's debugger.
+
+### When QA is dispatched
+
+Wrapping deterministic tiers in an agent bought one round trip per layer and
+returned the same finding the script had already produced. QA is dispatched only
+where a result needs interpreting, signalled by `needs_agent` in the gate output:
+
+- compile errors landing in a layer already marked `done` (cross-layer attribution)
+- `unparsed_tail` non-empty — the build failed in a way the parser could not classify
+- T2 `parse_errors` — a file that will not parse is unexamined, not passing
+- any tier returning `status: error` — the check itself did not run
+- **T5**, always: judging field ordering, null-versus-absent, and expected value
+  drift is the judgment a script cannot supply
+
+### T5 and mutating verbs
+
+`endpoint_diff.py probes` seeds parameterless GET routes enabled and everything
+else disabled. POST/PUT/PATCH/DELETE need two things `conf/routes` does not
+record: a request body, and identical starting state in both applications. Give
+each app its own disposable datastore, or reset and reseed between the two
+captures. Where that is not possible, a GET-only comparison is the honest check
+and the mutating paths stay a manual review — recorded as such, not as a pass.
+
 ### Why the journal is append-only
 
 A subagent's context dies with it. If dev is killed at file 8 of 15, everything
@@ -94,10 +139,13 @@ keeps all its fields and gains the new ones. Legacy keys (`autonomous`,
                  "validate_iteration", "last_error_count", "failure_reason" }
   },
 
-  "qa_findings": [ { "id": "F-001", "layer", "file", "tier": "T1|T2|T3|T4",
+  "qa_findings": [ { "id": "F-001", "layer", "file", "tier": "T1|T2|T3|T4|T5",
                      "severity": "blocker | major | minor",
                      "category", "evidence", "suggested_fix",
                      "status": "open | fixed | accepted", "created_at" } ],
+
+  "endpoint_verification": { "status", "checked_at", "probes_compared",
+                             "not_captured_after", "artifact": ".migration/endpoint-diff.json" },
 
   "attempts": { "<layer>": { "count", "error_signatures": [], "last_findings": [] } },
 

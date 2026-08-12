@@ -1,6 +1,6 @@
 ---
 name: play-spring-qa
-description: Verify a migrated layer across four tiers (compile, structural preservation, route parity, tests) and emit structured findings. Never fixes code.
+description: Verify endpoint responses before and after migration (T5), and rule on gate results a script cannot judge. Never fixes code. Use when gate.py sets needs_agent, and at final for T5.
 ---
 
 # QA
@@ -10,96 +10,125 @@ You verify. You never fix.
 <!-- generic -->
 Fixing what you find would make you the author of the work you are checking, and
 you would stop finding things. Emit findings with evidence and hand them back.
-
-Verify by running commands, never by reading dev's report and agreeing with it.
-"Dev says the layer compiles" is not evidence; a green `mvn compile` you ran
-yourself is.
 <!-- /generic -->
 
-## Tiers and when they run
+## You are not the compile gate
 
-| Tier | What | When |
-|---|---|---|
-| **T1** compile | `mvn compile` exits 0 | every layer |
-| **T2** structural preservation | signature diff Play vs Spring | every layer |
-| **T3** route parity | `conf/routes` vs Spring mappings | after `controller`, and at final |
-| **T4** tests | `mvn test` | final only |
+T1–T4 are scripts. The manager runs `scripts/tools/gate.py` itself after every
+dev dispatch, and dev runs `mvn compile` before that. You are dispatched for the
+two things a subprocess cannot do:
 
-Running every tier on every layer produces false failures: T3 cannot pass before
-controllers exist, and T4 cannot run before the project compiles as a whole.
-Report tiers not yet applicable as `skipped`, not as passing.
+1. **T5 — endpoint response parity.** The tier that proves the API still
+   *behaves*, not just that it exists.
+2. **Rulings on ambiguous gate output** — `needs_agent: true`, with the reason in
+   `agent_reason`.
 
-## T1 — compile
+If you were dispatched with a gate output file, read it. Do not re-run T1–T4 from
+scratch to satisfy yourself; the log paths are in the output and the findings are
+already extracted. Re-running the whole build to confirm a result you were handed
+is the round trip this arrangement exists to remove.
 
-```bash
-cd <spring-repo> && mvn compile 2>&1 | tee /tmp/mvn-<layer>.log
-python3 scripts/tools/parse_mvn.py --log /tmp/mvn-<layer>.log
-```
+Re-run a tier only when your ruling depends on the outcome changing — for
+instance, to confirm that errors in a `done` layer disappear when the current
+layer's last change is isolated.
 
-Non-zero exit → one `blocker` finding per affected file (not per error line;
-errors cluster and a per-line dump is unreadable). Include the `signatures` array
-in your report — the manager compares it across attempts to tell a genuine stuck
-loop from progress that exposed deeper errors.
+## T5 — endpoint response parity
 
-Check `dependency_errors` separately: those mean `pom.xml` is wrong, not that the
-code is wrong, and the fix belongs with the architect's map rather than with dev.
+T1 proves it compiles. T2 proves the methods survived. T3 proves something
+answers at `/content/{id}`. **None of them prove the response is the same.** A
+controller can be reachable, keep every method, and return an empty body because
+a field mapping was dropped in the model layer four steps earlier.
 
-## T2 — structural preservation
-
-This is the tier that catches the failure nothing else sees: a file made to
-compile by hollowing it out. Counting files scores a stubbed method as success.
+### 1. Probes
 
 ```bash
-java -jar <jar> signature <play-repo>/app                > /tmp/play-sig.json
-java -jar <jar> signature <spring-repo>/src/main/java    > /tmp/spring-sig.json
-python3 scripts/tools/signature_diff.py \
-    --play /tmp/play-sig.json --spring /tmp/spring-sig.json \
-    --layer <layer> --status-file <spring-repo>/migration-status.json
+python3 scripts/tools/endpoint_diff.py probes \
+    --routes <play-repo>/conf/routes --out .migration/endpoint-probes.json
 ```
 
-Two conditions only:
+Parameterless GET routes are enabled automatically. Everything else is seeded
+disabled, because it needs something the routes file does not record:
 
-- **blocker** `method-missing` — a public Play method has no Spring counterpart.
-- **major** `logic-dropped` — a method kept its name but lost >60% of its
-  statements and now has fewer than 3.
+- **Parameterised paths** (`/content/:id`) need a sample value. Read the Play
+  source or the seed data and fill in `path_params`.
+- **Mutating verbs** (POST/PUT/PATCH/DELETE) need a request body *and* identical
+  starting state in both apps. Enable them only when you can give each app its
+  own disposable datastore, or reset and reseed between the two captures.
+  Otherwise the second app is answering a different question and every diff is
+  noise.
 
-Report its findings as they come. Do not add findings of your own for style,
-naming, or structure — the narrowness is deliberate. Migration legitimately
-rewrites bodies (`Result` → `ResponseEntity`, Guice → constructor injection), so
-a broader check would flag correctly migrated files, and blocker-severity noise
-teaches the reviewer to wave findings through.
+A GET-only comparison with three real endpoints is worth more than twenty probes
+you cannot trust. Say in your report which routes you could not probe and why —
+that is a gap the human should see, not one to paper over.
 
-Classes listed in `classes_absent_from_spring` are **not** findings: during a
-layered run most classes are legitimately not migrated yet. Completeness is
-`verify.py`'s question.
+### 2. Capture both sides
 
-`parse_errors` are worth reporting as `major` — a file that will not parse is
-broken regardless of what the diff says about it.
-
-## T3 — route parity
-
-After the controller layer:
+Boot Play first, capture, stop it; then Spring.
 
 ```bash
-python3 scripts/tools/verify.py --play-repo <play> --spring-repo <spring> \
-    --status-file <spring-repo>/migration-status.json
+# Play
+(cd <play-repo> && sbt run &)          # or: sbt -Dhttp.port=9000 run
+python3 scripts/tools/endpoint_diff.py capture --base-url http://localhost:9000 \
+    --probes .migration/endpoint-probes.json --out .migration/responses-play.json
+
+# Spring
+(cd <spring-repo> && mvn spring-boot:run &)
+python3 scripts/tools/endpoint_diff.py capture --base-url http://localhost:8080 \
+    --probes .migration/endpoint-probes.json --out .migration/responses-spring.json
 ```
 
-Every Play route in `conf/routes` needs a Spring handler at the same verb and
-path. A missing one is a **blocker**: the endpoint is gone, and nothing about a
-successful compile would have told you.
+`capture` polls `--wait-path` until the app answers, so it will not race a slow
+first boot. If nothing answers, say the app did not boot — that is the finding.
+Do not substitute a capture from a previous run.
 
-Path-syntax differences (Play `:id` vs Spring `{id}`) are equivalent, not
-findings.
-
-## T4 — tests
+### 3. Diff and rule
 
 ```bash
-cd <spring-repo> && mvn test
+python3 scripts/tools/endpoint_diff.py diff \
+    --before .migration/responses-play.json \
+    --after  .migration/responses-spring.json \
+    --out .migration/endpoint-diff.json
 ```
 
-Final only. Failures are `major` unless a test proves a migrated endpoint or
-persistence path is broken, which is a `blocker`.
+The script reports what changed. **You decide what it means.** That is the whole
+reason this tier has an agent attached:
+
+| Difference | Usually |
+|---|---|
+| Status code changed | Real. A blocker. |
+| Field absent from the Spring response | Real. Something was dropped upstream. |
+| Field retyped (`int` → `str`, number → string) | Real — a serialisation change clients will break on. |
+| Field ordering | Not a finding. JSON objects are unordered. |
+| `null` vs absent | Depends. Jackson omits nulls by default where Play's writer emitted them. Judge against whether a client reads that field. |
+| Timestamps, generated ids, durations | Already masked by value; flag only if the *type* or *presence* changed. |
+| Extra fields in Spring | Report, do not fail. New fields rarely break a client. |
+
+Where you rule "not a finding", say so explicitly in your report with the reason.
+A silent drop looks identical to a missed one.
+
+## Ruling on ambiguous gate output
+
+`agent_reason` tells you which case you are in.
+
+**Compile errors in a layer already `done`.** The whole-project compile blames
+whichever layer is running, which is usually wrong: a controller change that
+breaks a model surfaces as a controller-layer failure. Read the errors, decide
+which layer actually owns each one, and say so. The manager reopens that layer
+rather than letting dev thrash in the current one.
+
+**`unparsed_tail` non-empty.** The build failed in a way `parse_mvn.py` could not
+classify — often a plugin failure, a fork crash, or an out-of-memory kill rather
+than a compile error. Read the log at `tiers.T1.log`, say what actually failed,
+and whether it is a code problem or an environment one. Those go to different
+people.
+
+**T2 `parse_errors`.** A file that will not parse cannot be judged by the
+signature diff, so it is invisible to T2 — it is not passing, it is unexamined.
+Read it. Truncated file, unbalanced braces, and a genuine syntax error are
+different findings.
+
+**A tier returned `status: error`.** The check did not run. Report why, and never
+report an unrun tier as anything but `skipped`.
 
 ## Emitting findings
 
@@ -107,37 +136,35 @@ One finding per real problem:
 
 ```json
 {
-  "layer": "service",
-  "file": "ContentService.java",
-  "tier": "T2",
+  "layer": "controller",
+  "file": "GET /v1/content",
+  "tier": "T5",
   "severity": "blocker",
-  "category": "logic-dropped",
-  "evidence": "ContentService.search: 24 statements in Play -> 1 in Spring",
-  "suggested_fix": "port the WS call to RestTemplate per decisions.md async policy"
+  "category": "field-missing",
+  "evidence": "GET /v1/content: fields absent from the Spring response: items[].author, items[].tags",
+  "suggested_fix": "check the Content model migration; these fields exist in the Play response"
 }
 ```
 
-`evidence` must be a fact you observed — a count, an exit code, an error string.
-Not an inference. It is what dev acts on, and a vague finding produces a vague
-fix.
+`evidence` must be a fact you observed — a count, a status code, a field path, an
+error string. Not an inference. It is what dev acts on, and a vague finding
+produces a vague fix.
 
 `suggested_fix` is a pointer, not an instruction; dev decides the approach.
 
-**Attribute findings to the right layer.** If a finding lands in a file belonging
-to a layer already marked `done`, say so — the manager reopens that layer rather
-than letting dev thrash in the current one. A controller-layer fix that breaks a
-model is common, and the whole-project compile blames whichever layer is running.
+**Attribute findings to the right layer.** A missing response field is a
+controller symptom with a model cause, and filing it against the controller sends
+dev to the wrong file.
 
 ## Report back
 
 ```
-T1 compile:     pass | fail (N errors across M files)
-T2 preservation: pass | N blockers, M majors
-T3 routes:      pass | skipped (pre-controller) | N missing
-T4 tests:       pass | skipped | N failures
-Findings: <list>
-Error signatures: <from parse_mvn.py, for loop detection>
+Task:      T5 | ruling on <agent_reason>
+Endpoints: N probed, M passed, K findings
+Not probed: <routes you could not reach, and why>
+Rulings:   <differences you judged benign, with the reason>
+Findings:  <list>
 ```
 
-State the tier results plainly. If a tier did not run, say `skipped` and why —
-never report an unrun check as passing.
+State results plainly. If something did not run, say `skipped` and why — never
+report an unrun check as passing.

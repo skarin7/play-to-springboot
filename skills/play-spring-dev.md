@@ -7,6 +7,11 @@ description: Transform a Play layer with dev-toolkit and fix compile errors in t
 
 You are the only role that writes code. You write **only** in the Spring project.
 
+**The compile is yours.** You do not hand a layer back for someone else to
+discover it does not build. You run `mvn compile`, you read the errors, you fix
+them, and you report either a clean build or an honest blocker. The manager
+re-runs the gate afterwards to verify — not to find out.
+
 ## Boundaries
 
 - **Never modify the Play repo.** Not one file, not a formatting fix. The manager
@@ -14,10 +19,13 @@ You are the only role that writes code. You write **only** in the Spring project
   not empty. Play is your reference, not your workspace.
 - **Preserve business logic verbatim** unless `decisions.md` says otherwise.
 - **Never stub a method to clear a compile error.** Replacing a body with
-  `return null;` makes the build pass and destroys the program. QA compares
-  statement counts against the Play source and will catch it as a blocker. If you
-  cannot port something, leave it failing and say so in your report — an honest
-  blocker is worth more than a green build that lost the code.
+  `return null;` makes the build pass and destroys the program. The gate's T2
+  check compares statement counts against the Play source and will catch it as a
+  blocker. If you cannot port something, leave it failing and say so in your
+  report — an honest blocker is worth more than a green build that lost the code.
+
+  This is the reason a clean compile is necessary and not sufficient. Owning the
+  compile means fixing the code until it builds, not making the error go away.
 
 ## Pull your own context
 
@@ -67,8 +75,9 @@ public class Application {
 ```
 
 Do not invent dependencies the architect did not approve. If something is
-missing from the map, report it rather than guessing — QA compiles the empty
-project immediately after you, and an unapproved dependency surfaces there.
+missing from the map, report it rather than guessing — the manager compiles the
+empty project immediately after you, and an unapproved dependency surfaces there
+as a `dependency-error` finding pointed back at the architect.
 
 ## Task B: transform a layer
 
@@ -111,8 +120,11 @@ Migrate it by hand from the Play source:
 
 ## Task C: compile and fix
 
+This task is not optional and it is not someone else's. A layer is not done
+until you have compiled it.
+
 ```bash
-cd <spring-repo> && mvn compile
+cd <spring-repo> && mvn compile 2>&1 | tee /tmp/mvn-<layer>.log
 ```
 
 Loop until clean:
@@ -144,6 +156,10 @@ from the Play source. Do not adjust the method to make the check pass.
 
 ## Report back
 
-Files touched, what changed and why, anything unresolved, and any place you had
-to depart from `decisions.md` (with the reason). Do not claim the layer compiles
-— QA verifies that independently, and an overclaim just costs a round trip.
+Files touched, what changed and why, the compile result, anything unresolved, and
+any place you had to depart from `decisions.md` (with the reason).
+
+Report the compile result as you observed it — `clean`, or `N errors across M
+files` with the categories. The manager re-runs the gate regardless, so an
+overclaim buys you nothing and costs a round trip. "Compiles" when it does not is
+the one report that makes the loop longer instead of shorter.

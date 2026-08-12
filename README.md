@@ -13,26 +13,26 @@ in skill documents rather than in orchestration code.
 | **manager** | no | Owns state, sequences layers, dispatches subagents, enforces gates, commits |
 | **researcher** | no | Surveys the Play repo before anything is built |
 | **architect** | no | Decides the dependency, config, and idiom mapping — before dev starts |
-| **dev** | **yes** | Runs the transformer, fixes compile errors. The only role that writes source |
-| **qa** | no | Verifies across four tiers, emits findings, never fixes |
+| **dev** | **yes** | Runs the transformer, compiles, fixes compile errors. The only role that writes source |
+| **qa** | no | Verifies endpoint responses before and after; rules on results a script cannot judge. Never fixes |
 
 ```
 manager → researcher → architect ──── GATE 1 (you approve the approach)
                                         ↓
-   dev writes pom/Application → QA compiles the EMPTY project (dependency check)
+   dev writes pom/Application → gate.py compiles the EMPTY project (dependency check)
                                         ↓
-   per layer:  dev → qa ──findings──┐   model → repository → manager
-                 ↑─────────────────┘    → service → controller → other
+   per layer:  dev → gate.py ──findings──┐   model → repository → manager
+                 ↑────────────────────────┘   → service → controller → other
                passes → commit → GATE 2 after the first layer
                                         ↓
-              final QA (T1-T4) ──── GATE 4 (you approve the merge)
+        gate.py --final + QA endpoint diff ──── GATE 4 (you approve the merge)
 ```
 
-Sequential by design: the layer dependency order is real, and QA on
+Sequential by design: the layer dependency order is real, and verifying
 half-migrated code is noise.
 
-Diagrams of the full flow, the dev/QA correction loop, and who writes what:
-**[docs/FLOW.md](docs/FLOW.md)**.
+Diagrams of the full flow, the dev/gate correction loop, endpoint parity, and who
+writes what: **[docs/FLOW.md](docs/FLOW.md)**.
 
 ### Why the roles are split this way
 
@@ -40,8 +40,16 @@ Diagrams of the full flow, the dev/QA correction loop, and who writes what:
   confident output that ignores how the codebase actually works.
 - The **architect** gate exists because a wrong `pom.xml` is not one bug — it is
   the same bug in every layer, found one layer at a time.
+- **Dev owns the compile.** Nobody should be dispatched to discover a missing
+  import. The manager re-runs the build in the gate regardless: dev's report is a
+  claim, the re-run is evidence.
+- **The verification gate is a script, not an agent.** T1–T4 are deterministic,
+  so the manager runs them itself via `scripts/tools/gate.py`. Wrapping them in a
+  dispatch cost a round trip per layer and returned the same finding the script
+  had already produced.
 - **QA never fixes**, because an agent that fixes what it checks stops finding
-  things. It re-runs the build itself rather than trusting dev's report.
+  things. It is dispatched for the judgment a script cannot supply: endpoint
+  response parity, and attributing a failure to the layer that actually caused it.
 
 ## Quick start
 
@@ -60,23 +68,35 @@ The manager stops at Gate 1 with the architect's decisions for your review.
 **Requirements:** Java 17+, Maven, Python 3.10+, and
 `dev-toolkit-1.0.0.jar` in `lib/`.
 
-## QA tiers
+## Verification tiers
 
-The check that matters most is T2. A file can compile, keep every method, and
-still have had its body replaced with `return null` — file counting scores that
-as success.
+| Tier | What | When | Who runs it |
+|---|---|---|---|
+| **T1** compile | `mvn compile` exits 0 | every layer | dev, then `gate.py` |
+| **T2** structural preservation | signature diff Play vs Spring | every layer, scoped to that layer | `gate.py` |
+| **T3** route parity | `conf/routes` vs Spring mappings | after `controller`, and final | `gate.py` |
+| **T4** tests | `mvn test` | final | `gate.py --final` |
+| **T5** endpoint responses | responses captured from both apps, diffed | final | **QA agent** |
 
-| Tier | What | When |
-|---|---|---|
-| **T1** compile | `mvn compile` exits 0 | every layer |
-| **T2** structural preservation | signature diff Play vs Spring | every layer |
-| **T3** route parity | `conf/routes` vs Spring mappings | after `controller`, and final |
-| **T4** tests | `mvn test` | final |
+Two of these earn their place by catching what the others cannot.
 
-T2 reports exactly two things — a public method that disappeared, and a method
-body that collapsed to near-nothing. The narrowness is deliberate: migration
-legitimately rewrites bodies, and blocker-severity false positives teach the
-reviewer to wave findings through.
+**T2** catches the stub-out. A file can compile, keep every method, and still
+have had its body replaced with `return null` — file counting scores that as
+success. It reports exactly two things: a public method that disappeared, and a
+method body that collapsed to near-nothing. The narrowness is deliberate;
+migration legitimately rewrites bodies, and blocker-severity false positives
+teach the reviewer to wave findings through.
+
+**T5** catches everything structural checks are blind to. T1–T4 prove the code
+builds, kept its methods, and answers at the right paths. Only T5 proves it
+returns the same thing. Boot Play, capture per-route responses, boot Spring,
+capture, diff. Volatile values (timestamps, ids, durations) are compared for
+presence and type rather than equality; field ordering is never a difference.
+What remains is judgment, which is why T5 is the tier with an agent attached.
+
+Mutating verbs are seeded disabled — a POST needs a request body `conf/routes`
+does not record, and identical starting state in both apps. See
+[docs/ORCHESTRATION.md](docs/ORCHESTRATION.md#phase-4--endpoint-parity-t5).
 
 ## Deterministic helpers
 
@@ -84,6 +104,8 @@ Agents call these; so can you. All print JSON to stdout.
 
 | Tool | Purpose |
 |---|---|
+| `scripts/tools/gate.py` | **T1–T4 in one call**, with a single verdict and findings |
+| `scripts/tools/endpoint_diff.py` | T5: seed probes, capture responses, diff them |
 | `scripts/tools/inventory.py` | Per-layer file counts, both trees; picks role mode |
 | `scripts/tools/verify.py` | Completeness + T3 route parity |
 | `scripts/tools/signature_diff.py` | T2 structural preservation |
@@ -93,7 +115,7 @@ Agents call these; so can you. All print JSON to stdout.
 | `scripts/tools/token_report.py` | Measured token and cost accounting per run |
 
 ```bash
-python3 scripts/tools/test_tools.py    # 52 tests, stdlib only
+python3 scripts/tools/test_tools.py    # 87 tests, stdlib only
 ```
 
 ## Layout after setup

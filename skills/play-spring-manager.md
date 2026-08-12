@@ -32,11 +32,16 @@ All print JSON to stdout. Run them from the kit directory.
 |---|---|
 | `python3 scripts/tools/inventory.py --play-repo P [--spring-repo S]` | File counts per layer; picks `collapsed`/`full` mode |
 | `python3 scripts/tools/state.py --status-file S <sub>` | `init`, `show`, `set`, `add-finding`, `fold-journal`, `gate` |
-| `python3 scripts/tools/verify.py --play-repo P --spring-repo S --status-file S` | Completeness (T3/counts) |
-| `python3 scripts/tools/parse_mvn.py --log L` | Maven log → structured errors |
+| `python3 scripts/tools/gate.py --play-repo P --spring-repo S --layer L` | **The verification gate**: T1–T4 in one call |
+| `python3 scripts/tools/verify.py --play-repo P --spring-repo S --status-file S` | Completeness (counts + routes) |
 
-Never run `mvn` yourself and read the output — that violates rule 2. QA runs it
-and reports.
+`gate.py` runs `mvn` for you and writes the raw log to `.migration/logs/`,
+printing only the parsed summary. That is what keeps rule 2 intact while still
+letting you own the check — you never see build output, only a verdict, a
+finding list, and `needs_agent`.
+
+Never run `mvn` directly and read its output yourself. That is the one way to
+break rule 2 by accident.
 
 ## Order of execution
 
@@ -76,11 +81,18 @@ downstream compiles against these choices. Do not proceed until
 ### 4. Initialize, then compile an empty project
 
 Dispatch `play-spring-dev` to generate `pom.xml`, `Application.java`, and
-`application.properties` per `decisions.md`. Then have QA run `mvn compile` with
-**no sources migrated yet**.
+`application.properties` per `decisions.md`. Then run the gate with T1 only and
+**no sources migrated yet**:
+
+```bash
+python3 scripts/tools/gate.py --play-repo <play> --spring-repo <spring> \
+    --layer init --tiers T1
+```
 
 This proves every declared dependency resolves. A wrong dependency map fails here
 in a minute rather than surfacing as mysterious compile errors four layers deep.
+`dependency_errors` in the output means the fault is in the architect's map, not
+in dev's code.
 
 ### 5. Per-layer loop
 
@@ -90,14 +102,26 @@ controller → other**.
 For each layer not already `done`:
 
 1. Dispatch `play-spring-dev` with the layer name and paths to `research.md` and
-   `decisions.md`. It transforms and fixes until it believes the layer compiles.
+   `decisions.md`. **Dev owns the compile**: it transforms, runs `mvn compile`,
+   and fixes until the build is clean or it has an honest blocker.
 2. Fold its journal: `state.py fold-journal --journal .migration/journal/<layer>-dev.ndjson --layer <layer>`
-3. Dispatch `play-spring-qa` for the layer. **Never skip this because dev said it
-   was fine** — dev's claim is not evidence, QA re-running the build is.
-4. If QA returns blocker or major findings, record them with `add-finding` and
-   re-dispatch dev **with the finding IDs attached**. The finding carries evidence;
-   a bare error dump does not.
-5. When QA passes, commit, and set the layer `done`.
+3. Run the gate yourself:
+
+   ```bash
+   python3 scripts/tools/gate.py --play-repo <play> --spring-repo <spring> --layer <layer>
+   ```
+
+   **Run it regardless of what dev reported.** Dev's claim that the layer
+   compiles is not evidence; this re-run is. Dev compiling first is not a
+   substitute for the gate — it is what stops the gate being dev's debugger.
+
+4. Act on `status`:
+   - `passed` → commit, set the layer `done`, move on.
+   - `failed` / `needs_review` with `needs_agent: false` → record the findings
+     with `add-finding` and re-dispatch dev **with the finding IDs attached**.
+     The finding carries evidence; a bare error dump does not.
+   - `needs_agent: true` → dispatch `play-spring-qa` with `agent_reason` and the
+     path to the gate output. See below.
 
 Between dispatches, run the Play-repo guard:
 
@@ -107,9 +131,35 @@ git -C <play-repo> status --porcelain
 
 Non-empty means dev modified the Play source, which it must never do. Escalate.
 
-### 6. Final QA → **GATE 4**
+### 6. When to dispatch QA
 
-Full T1–T4 plus `verify.py`. Present to the human for merge.
+The tiers are scripts, so most verification costs you a subprocess, not a round
+trip. Dispatch `play-spring-qa` only when `gate.py` sets `needs_agent`, which it
+does for the cases a script cannot rule on:
+
+| Trigger | Why an agent |
+|---|---|
+| Compile errors in a layer already `done` | Attributing breakage across layers is judgment; dev left alone will thrash in the current layer |
+| `unparsed_tail` non-empty | The build failed in a way the parser could not describe |
+| T2 `parse_errors` | A file that will not parse cannot be judged by the diff |
+| A tier returned `status: error` | The check itself did not run |
+| **T5 endpoint parity** (below) | Always — that is the tier that needs a reader |
+
+Dispatching QA on a clean scripted failure adds a round trip and returns the same
+finding the script already produced.
+
+### 7. Final gate → **GATE 4**
+
+```bash
+python3 scripts/tools/gate.py --play-repo <play> --spring-repo <spring> --final
+python3 scripts/tools/verify.py --play-repo <play> --spring-repo <spring> \
+    --status-file <spring>/migration-status.json
+```
+
+`--final` runs full-tree T2 plus T3 and T4. Then dispatch `play-spring-qa` for
+**T5**: boot both applications, capture responses per route, diff them. T1–T4
+prove the code compiles, kept its methods, and answers at the right paths. Only
+T5 proves it returns the same thing. Present both to the human for merge.
 
 ## Gates
 
@@ -128,8 +178,8 @@ blocker (`method-missing`); or a non-empty `git status` in the Play repo. Write
 signature sets, and what dev tried each time — then stop. The human should read
 one file, not a transcript.
 
-**Distinguish a stuck loop from progress.** Compare `signatures` from
-`parse_mvn.py` across attempts. An identical set means dev is going in circles.
+**Distinguish a stuck loop from progress.** Compare `tiers.T1.signatures` from
+`gate.py` across attempts. An identical set means dev is going in circles.
 A *different* set — even a larger one — usually means a fix landed and exposed
 errors underneath it, which is progress. Do not abandon a layer for growing error
 counts alone.
@@ -155,15 +205,35 @@ subagent has read access and will pull what it needs. Ask for a structured
 summary back, not a transcript.
 <!-- /generic -->
 
-Example:
+Dev:
 
 ```
 Load play-spring-dev. Layer: service.
 Decisions: .migration/decisions.md   Research: .migration/research.md
 Play repo: /path/to/play (READ ONLY)  Spring repo: /path/to/spring
 Open findings to fix: F-014 (see qa_findings in migration-status.json).
+Compile before you report back; the gate re-runs it either way.
 Journal your actions to .migration/journal/service-dev.ndjson.
 Return: files touched, what you changed, anything you could not resolve.
+```
+
+QA, on an ambiguous gate result:
+
+```
+Load play-spring-qa. Gate output: .migration/gate-service.json
+Reason: compile errors land in already-completed layer(s): model
+Play repo: /path/to/play  Spring repo: /path/to/spring
+Return: which layer each error belongs to, and findings with evidence.
+```
+
+QA, for T5:
+
+```
+Load play-spring-qa. Task: T5 endpoint parity.
+Probes: .migration/endpoint-probes.json
+Play repo: /path/to/play  Spring repo: /path/to/spring
+Boot each app, capture, diff, and rule on the differences.
+Return: per-endpoint verdict and findings. Do not fix anything.
 ```
 
 ## Halt conditions

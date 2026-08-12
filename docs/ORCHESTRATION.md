@@ -57,18 +57,29 @@ Approve, or send it back with corrections.
 
 ## Phase 2 — initialize and dependency-check
 
-Dev generates `pom.xml`, `Application.java`, and `application.properties`. QA then
-compiles the project with **no sources migrated**. Zero code, but it proves every
-declared dependency resolves — a bad dependency map fails here in a minute rather
-than surfacing as strange compile errors four layers deep.
+Dev generates `pom.xml`, `Application.java`, and `application.properties`. The
+manager then runs `gate.py --tiers T1` with **no sources migrated**. Zero code,
+but it proves every declared dependency resolves — a bad dependency map fails
+here in a minute rather than surfacing as strange compile errors four layers
+deep.
 
 ## Phase 3 — the layer loop
 
 Order: **model → repository → manager → service → controller → other**.
 
-Per layer: dev transforms and fixes → QA runs T1/T2 (plus T3 after controllers) →
-findings go back to dev with evidence attached → when QA passes, the manager
-commits.
+Per layer: dev transforms, compiles, and fixes → the manager runs `gate.py`
+(T1/T2, plus T3 after controllers) → findings go back to dev with evidence
+attached → when the gate passes, the manager commits.
+
+**Dev owns the compile.** It runs `mvn compile` and fixes until the build is
+clean. The gate re-runs it anyway — dev's report is a claim, the re-run is
+evidence — but nobody gets dispatched to discover a missing import.
+
+**The gate is a script, not an agent.** All four scripted tiers are
+deterministic, so the manager runs them itself. A QA subagent is dispatched only
+when `gate.py` sets `needs_agent`: errors landing in a layer already finished, a
+build failure the parser could not classify, or a file that would not parse.
+That removed one full agent round trip per layer.
 
 **Gate 2** fires after the `model` layer: read the three or so generated files. If
 the idiom is wrong, it is wrong in three files rather than in all of them.
@@ -81,17 +92,49 @@ Layers after that do not stop by default. Set `gates.mode: strict` in
 The manager stops and writes `.migration/escalation-<layer>.md` when any of:
 
 - a layer reaches 3 attempts
-- QA reports a T2 blocker (a public method disappeared)
+- the gate reports a T2 blocker (a public method disappeared)
 - `git -C <play-repo> status --porcelain` is non-empty (dev touched the Play repo)
 
 The file holds the open findings, the last three error-signature sets, and what
 dev tried. Read that rather than the transcript.
 
+## Phase 4 — endpoint parity (T5)
+
+Compile, signatures, and route parity prove the code builds, kept its methods,
+and answers at the right paths. None of them prove it **returns the same thing**.
+
+The manager dispatches QA to boot both applications and compare responses:
+
+```bash
+python3 scripts/tools/endpoint_diff.py probes \
+    --routes ../your-play-app/conf/routes --out .migration/endpoint-probes.json
+# boot Play, then:
+python3 scripts/tools/endpoint_diff.py capture --base-url http://localhost:9000 \
+    --probes .migration/endpoint-probes.json --out .migration/responses-play.json
+# boot Spring, then:
+python3 scripts/tools/endpoint_diff.py capture --base-url http://localhost:8080 \
+    --probes .migration/endpoint-probes.json --out .migration/responses-spring.json
+python3 scripts/tools/endpoint_diff.py diff \
+    --before .migration/responses-play.json --after .migration/responses-spring.json
+```
+
+Parameterless GET routes are probed automatically. Parameterised paths need a
+sample value in `path_params`. **POST/PUT/PATCH/DELETE stay disabled by default**:
+they need a request body, which `conf/routes` does not record, and identical
+starting state in both apps, since the first capture changes what the second one
+reads. Give each app a disposable datastore or reset between captures — otherwise
+report those routes as unproved rather than enabling them and reading noise.
+
+Timestamps, ids and durations are compared for presence and type, not equality;
+two runs of the same app differ there. Field ordering is never a difference.
+Everything left over is what QA rules on.
+
 ## Gate 4 — merge
 
-Final T1–T4 plus completeness and route parity. Counts do not need to match
-exactly: files in `no_migration` are subtracted from the baseline, and extra
-Spring files (config, error handlers) are expected.
+`gate.py --final` (full-tree T1–T4) plus `verify.py` for completeness and route
+parity, plus the T5 result. Counts do not need to match exactly: files in
+`no_migration` are subtracted from the baseline, and extra Spring files (config,
+error handlers) are expected.
 
 ## Resuming
 
@@ -108,11 +151,19 @@ python3 scripts/migration_orchestrator.py status --play-repo ../your-play-app
 # completeness and route parity
 python3 scripts/migration_orchestrator.py verify --play-repo ../your-play-app
 
-# structural preservation for one layer
+# the whole gate for one layer — same command the manager runs
+python3 scripts/tools/gate.py --play-repo ../your-play-app \
+    --spring-repo ../spring-your-play-app --layer service
+
+# structural preservation on its own
 java -jar dev-toolkit-1.0.0.jar signature <play>/app             > /tmp/p.json
 java -jar dev-toolkit-1.0.0.jar signature <spring>/src/main/java > /tmp/s.json
-python3 scripts/tools/signature_diff.py --play /tmp/p.json --spring /tmp/s.json --layer service
+python3 scripts/tools/signature_diff.py --play /tmp/p.json --spring /tmp/s.json \
+    --layer service --layer-only
 ```
+
+Raw Maven output from the gate lands in `<spring-repo>/.migration/logs/`; the
+command itself prints only the parsed verdict.
 
 ## Layer order
 

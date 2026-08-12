@@ -5,11 +5,16 @@ T2 structural preservation: compare Play signatures against Spring signatures.
     java -jar dev-toolkit-1.0.0.jar signature <play>/app        > play.json
     java -jar dev-toolkit-1.0.0.jar signature <spring>/src/main/java > spring.json
     python3 scripts/tools/signature_diff.py --play play.json --spring spring.json \\
-        --layer service
+        --layer service --layer-only
 
 Answers the one question file counting cannot: did the code survive, or was it
 hollowed out to make the build pass? A method rewritten as ``return null;`` still
 counts as a migrated file.
+
+``--layer-only`` restricts the comparison to Play classes that classify into
+``--layer``. During the per-layer loop that is what you want: a finding then
+names the layer that actually produced it, instead of re-reporting a class three
+layers old every time the gate runs. Omit it for the final full-tree pass.
 
 **Only two conditions are reported**, and the narrowness is the point. Migration
 legitimately rewrites bodies -- ``Result`` becomes ``ResponseEntity``, Guice
@@ -32,6 +37,11 @@ import json
 import sys
 from pathlib import Path
 from typing import Any
+
+try:
+    from layers import classify
+except ImportError:
+    from .layers import classify
 
 DEFAULT_DROP_RATIO = 0.6
 DEFAULT_MIN_STATEMENTS = 3
@@ -58,6 +68,22 @@ def index_by_class(tree: dict[str, Any]) -> dict[str, dict[str, Any]]:
         if name:
             out[name] = entry
     return out
+
+
+def filter_by_layer(tree: dict[str, Any], layer: str) -> dict[str, Any]:
+    """
+    Keep only entries whose path classifies into ``layer``.
+
+    Applied to the *Play* side only. The Spring side must stay whole: migration
+    relocates classes, and a service that landed under a different directory
+    would otherwise read as missing rather than as moved.
+    """
+    return {
+        key: entry
+        for key, entry in tree.items()
+        if isinstance(entry, dict)
+        and classify(entry.get("path") or key) == layer
+    }
 
 
 def parse_errors(tree: dict[str, Any]) -> list[dict[str, str]]:
@@ -155,9 +181,11 @@ def diff(
     drop_ratio: float = DEFAULT_DROP_RATIO,
     min_statements: int = DEFAULT_MIN_STATEMENTS,
     no_migration: set[str] | None = None,
+    layer_only: bool = False,
 ) -> dict[str, Any]:
     no_migration = no_migration or set()
-    play_classes = index_by_class(play_tree)
+    scoped_play = filter_by_layer(play_tree, layer) if layer_only else play_tree
+    play_classes = index_by_class(scoped_play)
     spring_classes = index_by_class(spring_tree)
 
     findings: list[dict[str, Any]] = []
@@ -185,9 +213,10 @@ def diff(
     return {
         "tier": "T2",
         "layer": layer,
+        "scope": "layer" if layer_only else "full-tree",
         "classes_compared": len(compared),
         "classes_absent_from_spring": sorted(not_yet_migrated),
-        "parse_errors": parse_errors(play_tree) + parse_errors(spring_tree),
+        "parse_errors": parse_errors(scoped_play) + parse_errors(spring_tree),
         "findings": findings,
         "status": "failed" if any(f["severity"] == "blocker" for f in findings)
         else ("needs_review" if findings else "passed"),
@@ -201,6 +230,12 @@ def main() -> int:
     parser.add_argument("--play", type=Path, required=True, help="Play signature JSON")
     parser.add_argument("--spring", type=Path, required=True, help="Spring signature JSON")
     parser.add_argument("--layer", default="unknown")
+    parser.add_argument(
+        "--layer-only",
+        action="store_true",
+        help="Compare only Play classes belonging to --layer. Use during the "
+             "per-layer loop; omit for the final full-tree pass.",
+    )
     parser.add_argument("--drop-ratio", type=float, default=DEFAULT_DROP_RATIO)
     parser.add_argument("--min-statements", type=int, default=DEFAULT_MIN_STATEMENTS)
     parser.add_argument(
@@ -228,6 +263,7 @@ def main() -> int:
         args.drop_ratio,
         args.min_statements,
         no_migration,
+        args.layer_only,
     )
     json.dump(result, sys.stdout, indent=2)
     sys.stdout.write("\n")

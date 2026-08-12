@@ -172,6 +172,17 @@ elif [[ ! -f "$ROUTE_MAP" ]]; then
   echo "No conf/routes found; created empty $ROUTE_MAP"
 fi
 
+# T5 probe list. Never overwritten: QA fills in path_params and enables mutating
+# verbs by hand, and a re-run of setup must not throw that work away.
+PROBES="${SPRING_REPO}/.migration/endpoint-probes.json"
+if [[ -f "${PLAY_REPO}/conf/routes" ]] && [[ ! -f "$PROBES" ]]; then
+  if python3 "$KIT_ROOT/scripts/tools/endpoint_diff.py" probes \
+        --routes "${PLAY_REPO}/conf/routes" --out "$PROBES" 2>/dev/null; then
+    probe_count=$(python3 -c "import json;print(sum(1 for p in json.load(open('$PROBES'))['probes'] if p['enabled']))" 2>/dev/null || echo "?")
+    echo "Wrote $PROBES ($probe_count enabled by default; the rest need a sample value or a body)"
+  fi
+fi
+
 # The Spring project needs to be a git repo so the manager can commit after each
 # layer passes QA -- that is what gives a rejected review gate something to reset
 # to, instead of a manual unwind.
@@ -257,4 +268,5 @@ echo ""
 echo "Deterministic helpers (run these yourself any time):"
 echo "  python3 $KIT_ROOT/scripts/tools/inventory.py --play-repo $PLAY_REPO"
 echo "  python3 $KIT_ROOT/scripts/tools/verify.py --play-repo $PLAY_REPO --spring-repo $SPRING_REPO"
+echo "  python3 $KIT_ROOT/scripts/tools/gate.py --play-repo $PLAY_REPO --spring-repo $SPRING_REPO --layer service"
 echo ""

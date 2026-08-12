@@ -19,6 +19,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import endpoint_diff  # noqa: E402
+import gate  # noqa: E402
 import parse_mvn  # noqa: E402
 import routes as routes_mod  # noqa: E402
 import signature_diff  # noqa: E402
@@ -640,6 +642,338 @@ class TestSignatureDiff(unittest.TestCase):
             self.PLAY, spring, "service", drop_ratio=0.3, min_statements=4
         )
         self.assertEqual(len(strict["findings"]), 1)
+
+
+class TestLayerScopedT2(unittest.TestCase):
+    """
+    --layer-only. Without it, every layer re-reports findings from classes that
+    belong to layers already signed off, and the manager cannot tell which layer
+    produced what.
+    """
+
+    PLAY = {
+        "services/ContentService.java": sig(
+            "services/ContentService.java", "ContentService",
+            [("search", 1, "public", "reference", 8)],
+        ),
+        "models/Content.java": sig(
+            "models/Content.java", "Content",
+            [("getTitle", 0, "public", "reference", 4)],
+        ),
+    }
+
+    SPRING = {
+        # Both hollowed out, so an unscoped diff reports two findings.
+        "service/ContentService.java": sig(
+            "service/ContentService.java", "ContentService",
+            [("search", 1, "public", "reference", 1)],
+        ),
+        "model/Content.java": sig(
+            "model/Content.java", "Content",
+            [("getTitle", 0, "public", "reference", 1)],
+        ),
+    }
+
+    def test_unscoped_reports_every_layer(self):
+        result = signature_diff.diff(self.PLAY, self.SPRING, "service")
+        self.assertEqual(result["scope"], "full-tree")
+        self.assertEqual(len(result["findings"]), 2)
+
+    def test_scoped_reports_only_this_layer(self):
+        result = signature_diff.diff(
+            self.PLAY, self.SPRING, "service", layer_only=True
+        )
+        self.assertEqual(result["scope"], "layer")
+        self.assertEqual(len(result["findings"]), 1)
+        self.assertIn("ContentService", result["findings"][0]["evidence"])
+
+    def test_spring_side_is_never_scoped(self):
+        """
+        Migration relocates classes. Filtering the Spring side by layer would
+        report a correctly migrated class as missing whenever it moved into a
+        directory that classifies differently.
+        """
+        spring_moved = {
+            "web/ContentService.java": sig(   # classifies as 'other'
+                "web/ContentService.java", "ContentService",
+                [("search", 1, "public", "reference", 8)],
+            )
+        }
+        result = signature_diff.diff(
+            self.PLAY, spring_moved, "service", layer_only=True
+        )
+        self.assertEqual(result["findings"], [])
+        self.assertEqual(result["classes_compared"], 1)
+
+    def test_scoped_parse_errors_do_not_leak_across_layers(self):
+        play = dict(self.PLAY)
+        play["models/Broken.java"] = {
+            "path": "models/Broken.java", "parse_error": "unbalanced braces"
+        }
+        scoped = signature_diff.diff(play, self.SPRING, "service", layer_only=True)
+        self.assertEqual(scoped["parse_errors"], [])
+        unscoped = signature_diff.diff(play, self.SPRING, "model", layer_only=True)
+        self.assertEqual(len(unscoped["parse_errors"]), 1)
+
+
+class TestGateVerdict(unittest.TestCase):
+    """
+    When the gate escalates to a QA agent. Every escalation is a round trip, so
+    the trigger list has to stay short: findings a script already explained do
+    not need an agent to restate them.
+    """
+
+    def test_clean_run_needs_no_agent(self):
+        tiers = {"T1": {"status": "passed"}, "T2": {"status": "passed"}}
+        self.assertEqual(gate.escalation_reasons(tiers, [], set(), "service"), [])
+
+    def test_ordinary_compile_failure_needs_no_agent(self):
+        tiers = {"T1": {"status": "failed", "unparsed_tail": ""}}
+        findings = [{"tier": "T1", "file": "services/ContentService.java",
+                     "severity": "blocker"}]
+        self.assertEqual(
+            gate.escalation_reasons(tiers, findings, {"model"}, "service"), []
+        )
+
+    def test_error_in_a_completed_layer_escalates(self):
+        """Cross-layer attribution is judgment; dev alone thrashes in the wrong file."""
+        tiers = {"T1": {"status": "failed", "unparsed_tail": ""}}
+        findings = [{"tier": "T1", "file": "models/Content.java", "severity": "blocker"}]
+        reasons = gate.escalation_reasons(tiers, findings, {"model"}, "service")
+        self.assertEqual(len(reasons), 1)
+        self.assertIn("model", reasons[0])
+
+    def test_unparsed_build_failure_escalates(self):
+        tiers = {"T1": {"status": "failed", "unparsed_tail": "[ERROR] plugin blew up"}}
+        reasons = gate.escalation_reasons(tiers, [], set(), "service")
+        self.assertTrue(any("could not classify" in r for r in reasons))
+
+    def test_t2_parse_error_escalates(self):
+        """An unparseable file is unexamined by T2, not passing."""
+        tiers = {"T1": {"status": "passed"},
+                 "T2": {"status": "passed",
+                        "parse_errors": [{"path": "X.java", "error": "eof"}]}}
+        reasons = gate.escalation_reasons(tiers, [], set(), "service")
+        self.assertTrue(any("would not parse" in r for r in reasons))
+
+    def test_tier_that_could_not_run_escalates(self):
+        tiers = {"T1": {"status": "passed"},
+                 "T2": {"status": "error", "reason": "dev-toolkit JAR not found"}}
+        reasons = gate.escalation_reasons(tiers, [], set(), "service")
+        self.assertTrue(any("T2 could not run" in r for r in reasons))
+
+    def test_verdict_ranks_failure_above_review(self):
+        self.assertEqual(gate.verdict({"T1": {"status": "passed"}}, []), "passed")
+        self.assertEqual(
+            gate.verdict({"T1": {"status": "passed"}},
+                         [{"severity": "major"}]), "needs_review")
+        self.assertEqual(
+            gate.verdict({"T1": {"status": "failed"}},
+                         [{"severity": "major"}]), "failed")
+        # A tier that errored is not a pass, even with no findings.
+        self.assertEqual(gate.verdict({"T2": {"status": "error"}}, []), "failed")
+
+    def test_skipped_tier_is_not_a_pass(self):
+        self.assertEqual(gate.skipped("no controllers yet")["status"], "skipped")
+        self.assertEqual(gate.verdict({"T3": gate.skipped("x")}, []), "passed")
+
+    def test_compile_findings_group_by_file(self):
+        """One finding per file, not per error line: errors cluster."""
+        t1 = {
+            "log": "/tmp/x.log",
+            "by_file": {
+                "A.java": [{"line": 3, "message": "cannot find symbol"},
+                           {"line": 9, "message": "cannot find symbol"},
+                           {"line": 12, "message": "bad operand"}],
+                "B.java": [{"line": 1, "message": "package does not exist"}],
+            },
+            "dependency_errors": ["[ERROR] Could not resolve dependencies for x"],
+        }
+        findings = gate.compile_findings(t1, "service")
+        self.assertEqual(len(findings), 3)          # 2 files + 1 dependency
+        by_file = {f["file"]: f for f in findings}
+        self.assertIn("3 error(s)", by_file["A.java"]["evidence"])
+        self.assertEqual(by_file["pom.xml"]["category"], "dependency-error")
+        # A dependency failure is the architect's problem, not dev's.
+        self.assertIn("architect", by_file["pom.xml"]["suggested_fix"])
+
+
+class TestEndpointProbes(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.routes = Path(self.tmp.name) / "routes"
+        self.routes.write_text(
+            "GET     /                 controllers.HomeController.index\n"
+            "GET     /v1/count         controllers.CountController.count\n"
+            "GET     /v1/item/:id      controllers.ItemController.show(id: String)\n"
+            "POST    /v1/item          controllers.ItemController.create\n",
+            encoding="utf-8",
+        )
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_only_parameterless_gets_are_enabled(self):
+        probes = endpoint_diff.build_probes(self.routes)["probes"]
+        enabled = [p["name"] for p in probes if p["enabled"]]
+        self.assertEqual(enabled, ["GET /", "GET /v1/count"])
+
+    def test_parameterised_route_carries_a_stub_to_fill_in(self):
+        probes = endpoint_diff.build_probes(self.routes)["probes"]
+        param = next(p for p in probes if ":id" in p["path"])
+        self.assertEqual(param["path_params"], {})
+        self.assertFalse(param["enabled"])
+
+    def test_mutating_route_is_disabled_and_says_why(self):
+        """
+        POST needs a body and identical starting state in both apps -- neither of
+        which conf/routes records, so it cannot be probed automatically.
+        """
+        probes = endpoint_diff.build_probes(self.routes)["probes"]
+        post = next(p for p in probes if p["verb"] == "POST")
+        self.assertFalse(post["enabled"])
+        self.assertIn("state", post["note"])
+        self.assertIn("body", post)
+
+    def test_path_params_are_substituted(self):
+        self.assertEqual(
+            endpoint_diff.resolve_path(
+                {"path": "/v1/item/:id", "path_params": {"id": "42"}}
+            ),
+            "/v1/item/42",
+        )
+        self.assertEqual(
+            endpoint_diff.resolve_path(
+                {"path": "/v1/item/$id<[0-9]+>", "path_params": {"id": "7"}}
+            ),
+            "/v1/item/7",
+        )
+
+
+def response(name, status=200, body=None, text=None, content_type="application/json"):
+    record = {"name": name, "verb": "GET", "url": "http://x" + name,
+              "status": status, "content_type": content_type}
+    if body is not None:
+        record["json"] = body
+        record["body_length"] = len(json.dumps(body))
+    if text is not None:
+        record["text"] = text
+        record["body_length"] = len(text)
+    return record
+
+
+class TestEndpointDiff(unittest.TestCase):
+    """
+    T5. As with T2, the false-positive tests carry more weight: a tier that
+    flags every timestamp is a tier nobody reads by the third layer.
+    """
+
+    def test_identical_responses_pass(self):
+        before = [response("/a", body={"title": "x", "count": 3})]
+        after = [response("/a", body={"title": "x", "count": 3})]
+        result = endpoint_diff.diff_captures(before, after)
+        self.assertEqual(result["status"], "passed")
+        self.assertFalse(result["needs_agent"])
+
+    def test_volatile_values_are_not_findings(self):
+        """Two runs of the same app differ here; equality would fail always."""
+        before = [response("/a", body={
+            "id": "abc", "createdAt": "2024-01-01T00:00:00Z",
+            "took_ms": 12, "title": "x"})]
+        after = [response("/a", body={
+            "id": "zzz", "createdAt": "2025-06-02T11:00:00Z",
+            "took_ms": 40, "title": "x"})]
+        self.assertEqual(endpoint_diff.diff_captures(before, after)["status"], "passed")
+
+    def test_volatile_matching_is_by_token_not_substring(self):
+        self.assertTrue(endpoint_diff.is_volatile("createdAt"))
+        self.assertTrue(endpoint_diff.is_volatile("created_at"))
+        self.assertTrue(endpoint_diff.is_volatile("userId"))
+        # Substring matching would swallow these, and they carry real values.
+        self.assertFalse(endpoint_diff.is_volatile("identifier"))
+        self.assertFalse(endpoint_diff.is_volatile("valid"))
+        self.assertFalse(endpoint_diff.is_volatile("title"))
+
+    def test_volatile_key_retyped_is_still_caught(self):
+        """Masking the value must not mask a serialisation change."""
+        before = [response("/a", body={"id": 7})]
+        after = [response("/a", body={"id": "7"})]
+        result = endpoint_diff.diff_captures(before, after)
+        self.assertEqual(
+            [f["category"] for f in result["findings"]], ["field-retyped"]
+        )
+
+    def test_missing_field_is_a_blocker(self):
+        before = [response("/a", body={"title": "x", "author": "me"})]
+        after = [response("/a", body={"title": "x"})]
+        result = endpoint_diff.diff_captures(before, after)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["findings"][0]["category"], "field-missing")
+        self.assertIn("author", result["findings"][0]["evidence"])
+
+    def test_extra_field_is_reported_not_failed(self):
+        before = [response("/a", body={"title": "x"})]
+        after = [response("/a", body={"title": "x", "etagVersion": 2})]
+        result = endpoint_diff.diff_captures(before, after)
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["endpoints"][0]["added_fields"], ["etagVersion"])
+
+    def test_status_change_is_a_blocker(self):
+        result = endpoint_diff.diff_captures(
+            [response("/a", status=200, body={"t": 1})],
+            [response("/a", status=500, body={"t": 1})],
+        )
+        self.assertEqual(result["findings"][0]["category"], "status-changed")
+        self.assertEqual(result["status"], "failed")
+
+    def test_unreachable_endpoint_is_a_blocker(self):
+        after = {"name": "/a", "verb": "GET", "status": None,
+                 "error": "Connection refused"}
+        result = endpoint_diff.diff_captures([response("/a", body={})], [after])
+        self.assertEqual(result["findings"][0]["category"], "endpoint-unreachable")
+
+    def test_value_change_is_major_and_wants_a_reader(self):
+        before = [response("/a", body={"count": 3})]
+        after = [response("/a", body={"count": 0})]
+        result = endpoint_diff.diff_captures(before, after)
+        self.assertEqual(result["status"], "needs_review")
+        self.assertEqual(result["findings"][0]["severity"], "major")
+        self.assertTrue(result["needs_agent"])
+
+    def test_list_length_change_is_reported_once(self):
+        """Not as N missing fields -- the shape is the same, the contents are not."""
+        before = [response("/a", body={"items": [{"t": "a"}, {"t": "b"}]})]
+        after = [response("/a", body={"items": [{"t": "a"}]})]
+        result = endpoint_diff.diff_captures(before, after)
+        categories = [f["category"] for f in result["findings"]]
+        self.assertEqual(categories, ["value-changed"])
+        self.assertIn("2 item(s) -> 1", result["findings"][0]["evidence"])
+
+    def test_field_ordering_is_not_a_difference(self):
+        before = [response("/a", body={"a": 1, "b": 2})]
+        after = [response("/a", body={"b": 2, "a": 1})]
+        self.assertEqual(endpoint_diff.diff_captures(before, after)["status"], "passed")
+
+    def test_json_to_text_is_a_blocker(self):
+        before = [response("/a", body={"t": 1})]
+        after = [response("/a", text="Internal Server Error",
+                          content_type="text/plain")]
+        categories = [
+            f["category"] for f in endpoint_diff.diff_captures(before, after)["findings"]
+        ]
+        self.assertIn("body-kind-changed", categories)
+
+    def test_endpoint_missing_from_the_after_capture_fails(self):
+        """A probe that silently vanished must not read as a pass."""
+        result = endpoint_diff.diff_captures([response("/a", body={})], [])
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["not_captured_after"], ["/a"])
+
+    def test_content_type_change_is_major(self):
+        result = endpoint_diff.diff_captures(
+            [response("/a", body={"t": 1}, content_type="application/json")],
+            [response("/a", body={"t": 1}, content_type="text/plain")],
+        )
+        self.assertEqual(result["findings"][0]["category"], "content-type-changed")
+        self.assertEqual(result["status"], "needs_review")
 
 
 if __name__ == "__main__":

@@ -55,6 +55,8 @@ Each prints JSON to stdout and does one thing.
 
 | Tool | Purpose |
 |---|---|
+| `gate.py` | **T1–T4 in one call**; one verdict, findings, and `needs_agent` |
+| `endpoint_diff.py` | **T5** endpoint response parity: probes, capture, diff |
 | `layers.py` | Layer classification; also detects a stale dev-toolkit JAR |
 | `inventory.py` | Per-layer counts for both trees; picks `collapsed`/`full` role mode |
 | `parse_mvn.py` | Maven log → structured errors, grouped by file, with signatures |
@@ -65,8 +67,51 @@ Each prints JSON to stdout and does one thing.
 | `token_report.py` | Measured token/cost accounting from Claude Code transcripts |
 
 ```bash
-python3 scripts/tools/test_tools.py     # 52 tests, stdlib only
+python3 scripts/tools/test_tools.py     # 87 tests, stdlib only
 ```
+
+### `gate.py`
+
+The manager runs this after every dev dispatch, instead of dispatching a QA
+agent. All four tiers are deterministic, so an agent added a round trip per layer
+and returned the same findings the scripts produced.
+
+```bash
+gate.py --play-repo P --spring-repo S --layer service     # T1 + T2 (layer-scoped)
+gate.py --play-repo P --spring-repo S --layer controller  # adds T3
+gate.py --play-repo P --spring-repo S --final             # full-tree T2, plus T3 and T4
+gate.py --play-repo P --spring-repo S --layer init --tiers T1   # empty-project dependency check
+```
+
+Raw Maven output goes to `<spring-repo>/.migration/logs/`; stdout carries only
+the parsed verdict, which is what lets the manager own the check without
+ingesting build output.
+
+Play-side signatures are extracted once and cached under `.migration/cache/` —
+the Play tree is read-only for the whole run, so re-extracting it every layer was
+pure cost. `--refresh-cache` forces a re-read.
+
+`needs_agent` is the only reason left to dispatch QA: an error landing in a layer
+already `done`, a build failure the parser could not classify, a file that would
+not parse, or a tier that could not run.
+
+### `endpoint_diff.py`
+
+```bash
+endpoint_diff.py probes  --routes <play>/conf/routes --out .migration/endpoint-probes.json
+endpoint_diff.py capture --base-url http://localhost:9000 --probes P --out before.json
+endpoint_diff.py capture --base-url http://localhost:8080 --probes P --out after.json
+endpoint_diff.py diff    --before before.json --after after.json
+```
+
+Parameterless GET routes are enabled on seeding; parameterised paths need
+`path_params` filled in, and mutating verbs need a body plus identical starting
+state in both apps, so they stay disabled until someone supplies both.
+
+Values under volatile keys (`createdAt`, `userId`, `took_ms`, …) are compared for
+presence and type, not equality — two runs of the *same* app differ there, and a
+tier that always complains is a tier nobody reads. Keys are matched by token, so
+`identifier` and `valid` are not treated as volatile.
 
 ### `state.py`
 
@@ -99,6 +144,12 @@ layers that were still advancing.
 Defaults: a method must lose more than 60% of its statements **and** end up with
 fewer than 3 before it is reported. Override with `--drop-ratio` and
 `--min-statements`, or per project in `decisions.md`.
+
+`--layer-only` restricts the comparison to Play classes belonging to `--layer`,
+which is what the per-layer gate uses: without it, every layer re-reports
+findings against classes three layers old. Only the Play side is scoped —
+migration relocates classes, so filtering the Spring side would report a moved
+class as missing.
 
 Loosening them to silence findings defeats the check — the point is that it is
 quiet enough to be believed when it does fire.
