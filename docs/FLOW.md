@@ -116,7 +116,7 @@ flowchart TD
     style GATE fill:#d1ecf1,stroke:#0c5460,color:#000
 ```
 
-[PNG](flow-2-dev-qa-loop.png)
+[PNG](flow-2-dev-gate-loop.png)
 
 ### Why the loop closes instead of spinning
 

@@ -179,8 +179,9 @@ deliberate persistence refactor.
 
 If the CLI cannot safely transform something, dev ports it by hand from the Play
 source, or reports it unresolved. **Business logic is never dropped to make the
-build pass** — QA's T2 check compares statement counts against the Play source
-and reports a hollowed-out method as a blocker.
+build pass** — the T2 check compares statement counts against the Play source and
+reports a hollowed-out method as a blocker. T2 is a script (`signature_diff.py`,
+run by the manager through `gate.py`), not an agent judgement.
 
 ---
 
@@ -201,15 +202,23 @@ complains is a check nobody reads.
 
 Compiling proves the code builds. It does not prove the program survived.
 
-| Tier | Catches |
-|---|---|
-| **T1** compile | syntax, types, missing dependencies |
-| **T2** signature diff | a method deleted, or hollowed out to `return null` |
-| **T3** route parity | an endpoint that compiles but is unreachable — no mapping annotation |
-| **T4** tests | behavioral regressions |
+| Tier | Catches | Run by |
+|---|---|---|
+| **T1** compile | syntax, types, missing dependencies | dev, then `gate.py` |
+| **T2** signature diff | a method deleted, or hollowed out to `return null` | `gate.py` |
+| **T3** route parity | an endpoint that compiles but is unreachable — no mapping annotation | `gate.py` (after `controller`) |
+| **T4** tests | behavioral regressions | `gate.py --final` |
+| **T5** endpoint responses | a route that answers, but with a field dropped or retyped | QA agent |
 
 File counting catches none of T2 or T3: a stubbed method is still one file, and a
 controller missing `@GetMapping` still compiles.
+
+T1–T4 are deterministic, so the manager runs `scripts/tools/gate.py` itself after
+every dev dispatch rather than dispatching an agent to re-run subprocesses. QA is
+dispatched only when `gate.py` sets `needs_agent` — a finding that needs a ruling
+rather than a comparison — and at the end for T5, which needs both applications
+booted and a judgement on what each difference means. See
+[ORCHESTRATION.md](ORCHESTRATION.md#phase-4--endpoint-parity-t5).
 
 ---
 
@@ -220,5 +229,5 @@ controller missing `@GetMapping` still compiles.
 - Dev appends to `.migration/journal/<layer>-dev.ndjson` as it works, so a
   subagent killed mid-layer is resumed rather than restarted — its context is
   gone, but its journal is not.
-- The manager commits after each layer passes QA, so a rejected review gate is a
-  reset rather than a manual unwind.
+- The manager commits after each layer passes the gate, so a rejected review gate
+  is a reset rather than a manual unwind.
