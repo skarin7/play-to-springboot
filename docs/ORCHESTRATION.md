@@ -26,9 +26,9 @@ Check the inventory before starting:
 python3 scripts/migration_orchestrator.py status --play-repo ../your-play-app
 ```
 
-If `stale_jar_warnings.affected` is non-empty, the JAR in the Play repo predates
-the LayerDetector fix and will place those files in the wrong layer. Refresh it
-from `lib/` first.
+If `toolkit_jar.status` is `stale`, the JAR in the Play repo predates the
+LayerDetector fix and will place the listed files in the wrong layer. Refresh it
+from `lib/` first. `current` needs no action.
 
 ## Phase 1 — run the manager
 

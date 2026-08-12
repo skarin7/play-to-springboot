@@ -25,9 +25,11 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from layers import LAYER_ORDER, classify, divergences, empty_counts
+    from layers import (LAYER_ORDER, classify, divergences, empty_counts,
+                        jar_has_layer_fix)
 except ImportError:  # invoked as a module rather than a script
-    from .layers import LAYER_ORDER, classify, divergences, empty_counts
+    from .layers import (LAYER_ORDER, classify, divergences, empty_counts,
+                         jar_has_layer_fix)
 
 
 def iso_now() -> str:
@@ -56,6 +58,56 @@ def scan(source_root: Path) -> tuple[list[str], dict[str, int]]:
     for rel in rel_paths:
         counts[classify(rel)] += 1
     return rel_paths, counts
+
+
+def check_jar(
+    play_repo: Path,
+    jar_override: Path | None,
+    rel_paths: list[str],
+) -> dict[str, Any]:
+    """
+    Report whether the dev-toolkit JAR in use predates the LayerDetector fix.
+
+    Inspects the JAR itself. An earlier version of this check instead asked
+    "would a pre-fix JAR misclassify these paths?", which is a property of the
+    project layout, not of the JAR -- so it fired on every flat-layout project
+    forever, including correctly configured ones. A check that always complains
+    is a check nobody reads.
+
+    The affected-file list is only computed when the JAR is actually old, where
+    it tells you what will break.
+    """
+    jar = jar_override or (play_repo / "dev-toolkit-1.0.0.jar")
+    has_fix = jar_has_layer_fix(jar)
+
+    if has_fix is True:
+        return {"path": str(jar), "status": "current"}
+
+    if has_fix is None:
+        return {
+            "path": str(jar),
+            "status": "not_found",
+            "note": (
+                "No readable dev-toolkit JAR here, so its version could not be "
+                "confirmed. Run setup to copy the current one from the kit's lib/."
+            ),
+        }
+
+    affected = divergences(rel_paths)
+    return {
+        "path": str(jar),
+        "status": "stale",
+        "note": (
+            "This JAR predates the LayerDetector segment-matching fix. It will "
+            "migrate the files below in the wrong layer -- controllers land in "
+            "'other' and never receive @RestController. Replace it with the JAR "
+            "from the kit's lib/."
+        ),
+        "affected": [
+            {"path": d.path, "correct_layer": d.correct, "old_jar_layer": d.jar_actual}
+            for d in affected
+        ],
+    }
 
 
 def inventory_tree(source_root: Path | None, java_root_label: str) -> dict[str, Any]:
@@ -87,6 +139,12 @@ def main() -> int:
         help="Java source dir under the Play repo (default: app).",
     )
     parser.add_argument(
+        "--jar",
+        type=Path,
+        default=None,
+        help="dev-toolkit JAR to version-check (default: <play-repo>/dev-toolkit-1.0.0.jar).",
+    )
+    parser.add_argument(
         "--collapsed-threshold",
         type=int,
         default=20,
@@ -112,26 +170,13 @@ def main() -> int:
             )
         else:
             rel_paths, _ = scan(root)
-            # Files that a pre-segment-matching dev-toolkit JAR would place in the
-            # wrong layer. Empty on a current JAR; non-empty means the JAR copied
-            # into the Play repo predates the fix and will mis-migrate these.
-            warnings = divergences(rel_paths)
-            out["stale_jar_warnings"] = {
-                "note": (
-                    "Non-empty means the dev-toolkit JAR in use may predate the "
-                    "LayerDetector segment-matching fix. Verify the JAR is current; "
-                    "an old one migrates these files in the wrong layer (controllers "
-                    "land in 'other' and never receive @RestController)."
-                ),
-                "affected": [
-                    {"path": d.path, "correct_layer": d.correct, "old_jar_layer": d.jar_actual}
-                    for d in warnings
-                ],
-            }
-            if warnings:
+            jar_status = check_jar(play_repo, args.jar, rel_paths)
+            out["toolkit_jar"] = jar_status
+            if jar_status["status"] == "stale":
                 print(
-                    f"[warn] {len(warnings)} file(s) would be mis-classified by a "
-                    f"pre-fix dev-toolkit JAR; confirm the JAR is current",
+                    f"[warn] dev-toolkit JAR at {jar_status['path']} predates the "
+                    f"LayerDetector fix; {len(jar_status['affected'])} file(s) will "
+                    f"migrate in the wrong layer. Replace it from the kit's lib/.",
                     file=sys.stderr,
                 )
             out["mode"] = (

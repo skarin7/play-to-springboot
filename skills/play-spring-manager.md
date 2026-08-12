@@ -52,10 +52,11 @@ Record `source_inventory` and `mode` into state. Under 20 Play files you are in
 **collapsed** mode: researcher and architect merge into one dispatch, and gates 2
 and 4 merge into a single end review.
 
-Check `stale_jar_warnings.affected`. Non-empty means the `dev-toolkit-1.0.0.jar`
-in the Play repo predates the LayerDetector fix and will migrate those files in
-the wrong layer — controllers land in `other` and never receive
-`@RestController`. Refresh the JAR from the kit's `lib/` before going further.
+Check `toolkit_jar.status`. `stale` means the `dev-toolkit-1.0.0.jar` in the
+Play repo predates the LayerDetector fix and will migrate the listed files in the
+wrong layer — controllers land in `other` and never receive `@RestController`.
+Refresh the JAR from the kit's `lib/` before going further. `current` needs no
+action; `not_found` means run setup.
 
 ### 2. Researcher
 

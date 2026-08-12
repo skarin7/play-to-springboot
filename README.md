@@ -145,6 +145,9 @@ Full schema, handoff rules, and gate semantics: **[docs/STATE-CONTRACT.md](docs/
 - `scripts/migration_orchestrator.py` no longer orchestrates. It does workspace
   setup and status reporting. Sequencing, model choice, and failure handling
   belong to the agent now.
-- If `inventory.py` reports `stale_jar_warnings`, the `dev-toolkit-1.0.0.jar` in
-  your Play repo predates the LayerDetector segment-matching fix and will migrate
-  those files in the wrong layer. Refresh it from `lib/`.
+- `inventory.py` reports `toolkit_jar.status`. It inspects the JAR itself, so it
+  is silent (`current`) in the normal case. `stale` means the
+  `dev-toolkit-1.0.0.jar` in your Play repo predates the LayerDetector
+  segment-matching fix and will migrate the listed files in the wrong layer —
+  the filename is never version-bumped, so the JAR cannot be told apart by name.
+  Refresh it from `lib/`.

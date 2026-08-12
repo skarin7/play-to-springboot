@@ -67,8 +67,9 @@ Matching is on whole segments. An earlier version substring-matched
 `/controllers/` against a path already relative to `app/`, so Play's default
 scaffold layout (`app/controllers/HomeController.java`, `package controllers;`)
 never matched and every controller migrated as `other` with no `@RestController`.
-If `inventory.py` reports `stale_jar_warnings`, the JAR in your Play repo still
-has that behavior — refresh it from `lib/`.
+If `inventory.py` reports `toolkit_jar.status: stale`, the JAR in your Play repo
+still has that behavior — refresh it from `lib/`. The check inspects the JAR
+rather than the layout, so it stays silent once the JAR is current.
 
 ### Migration order
 

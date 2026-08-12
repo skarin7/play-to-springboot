@@ -31,11 +31,11 @@ The manager already ran `scripts/tools/inventory.py`; read its output rather tha
 recounting. Note anything surprising: layers with zero files, a Java root that is
 not `app/`, generated sources.
 
-**Check `stale_jar_warnings.affected`.** Non-empty means the dev-toolkit JAR in
-the Play repo predates the LayerDetector fix and will place those files in the
-wrong layer — a flat `app/controllers/` directory classified as `other`, migrated
-last, with no `@RestController`. Flag it prominently; the human needs to see this
-at Gate 1.
+**Check `toolkit_jar.status`.** `stale` means the dev-toolkit JAR in the Play
+repo predates the LayerDetector fix and will place the listed files in the wrong
+layer — a flat `app/controllers/` directory classified as `other`, migrated last,
+with no `@RestController`. Flag it prominently; the human needs to see this at
+Gate 1. `current` needs no mention.
 
 ### 2. Build dependencies — `build.sbt`
 

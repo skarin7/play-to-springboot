@@ -3,6 +3,8 @@
 Diagrams of how a run is sequenced, how the dev/QA loop corrects itself, and who
 is allowed to write what.
 
+Rendered PNGs sit alongside this file for viewers without mermaid support.
+
 For the operator walkthrough see [ORCHESTRATION.md](ORCHESTRATION.md); for the
 schema and gate rules see [STATE-CONTRACT.md](STATE-CONTRACT.md).
 
@@ -12,7 +14,7 @@ schema and gate rules see [STATE-CONTRACT.md](STATE-CONTRACT.md).
 
 ```mermaid
 flowchart TD
-    START([setup.sh]) --> INV["inventory.py<br/>counts, mode, stale-JAR check"]
+    START([setup.sh]) --> INV["inventory.py<br/>counts, mode, JAR version check"]
     INV --> RES[researcher<br/>reads Play repo]
     RES --> ARCH[architect<br/>decides mapping]
     ARCH --> G1{{"GATE 1 — human<br/>approve the approach"}}
@@ -41,6 +43,8 @@ flowchart TD
     style G4 fill:#fff3cd,stroke:#b8860b,color:#000
     style EMPTY fill:#d1ecf1,stroke:#0c5460,color:#000
 ```
+
+[PNG](flow-1-end-to-end.png)
 
 The empty-project compile is worth its own box. Zero sources, but it fails a bad
 dependency map in a minute instead of surfacing as strange compile errors four
@@ -98,6 +102,8 @@ flowchart TD
     style ESC fill:#fff3cd,stroke:#b8860b,color:#000
 ```
 
+[PNG](flow-2-dev-qa-loop.png)
+
 ### Why the loop closes instead of spinning
 
 **QA never trusts dev's claim.** "The layer compiles" is not evidence; QA re-runs
@@ -146,6 +152,8 @@ sequenceDiagram
     M->>M: commit "layer(service): 3 files, QA T1/T2 clean"
 ```
 
+[PNG](flow-3-finding-lifecycle.png)
+
 T1 passed on the stub. Counting files would also have passed — a stubbed method
 is still one migrated file. T2 is the only tier that sees it.
 
@@ -186,6 +194,8 @@ flowchart LR
     style SPRING fill:#e8f5e9,stroke:#2e7d32,color:#000
 ```
 
+[PNG](flow-4-write-ownership.png)
+
 - **Only dev writes source**, and only into the Spring tree. Enforced by tool
   grants in `.claude/agents/`; backstopped by the `git status` guard on the Play
   repo after every dispatch.
@@ -215,6 +225,8 @@ flowchart TD
     style SUB fill:#f3e5f5,stroke:#6a1b9a,color:#000
     style DISK fill:#eeeeee,stroke:#616161,color:#000
 ```
+
+[PNG](flow-5-context-handoff.png)
 
 **The invariant: the manager ingests no source code and no raw build output.**
 

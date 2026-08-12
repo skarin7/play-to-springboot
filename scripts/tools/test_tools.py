@@ -24,7 +24,8 @@ import routes as routes_mod  # noqa: E402
 import signature_diff  # noqa: E402
 import state  # noqa: E402
 import verify  # noqa: E402
-from layers import classify, classify_legacy, divergences  # noqa: E402
+from layers import (classify, classify_legacy, divergences,  # noqa: E402
+                    jar_has_layer_fix)
 
 
 class TestClassify(unittest.TestCase):
@@ -121,6 +122,50 @@ class TestLegacyDivergence(unittest.TestCase):
         )
         for d in found:
             self.assertEqual(d.jar_actual, "other")
+
+
+class TestJarVersionCheck(unittest.TestCase):
+    """
+    The check must inspect the JAR, not the project layout.
+
+    An earlier version asked "would a pre-fix JAR misclassify these paths?",
+    which is a property of the layout - so it fired on every flat-layout project
+    forever, including correctly configured ones.
+    """
+
+    def _jar(self, path: Path, entries: list[str]) -> Path:
+        import zipfile
+        with zipfile.ZipFile(path, "w") as z:
+            for e in entries:
+                z.writestr(e, "")
+        return path
+
+    def test_jar_with_marker_is_current(self):
+        with tempfile.TemporaryDirectory() as d:
+            jar = self._jar(
+                Path(d) / "dev-toolkit-1.0.0.jar",
+                ["com/phenom/devtoolkit/LayerDetector.class",
+                 "com/phenom/devtoolkit/SignatureExtractor.class"],
+            )
+            self.assertIs(jar_has_layer_fix(jar), True)
+
+    def test_jar_without_marker_is_stale(self):
+        with tempfile.TemporaryDirectory() as d:
+            jar = self._jar(
+                Path(d) / "dev-toolkit-1.0.0.jar",
+                ["com/phenom/devtoolkit/LayerDetector.class"],
+            )
+            self.assertIs(jar_has_layer_fix(jar), False)
+
+    def test_missing_jar_is_unknown_not_stale(self):
+        # Absent must not read as broken; the caller reports "not_found".
+        self.assertIsNone(jar_has_layer_fix(Path("/nonexistent/dev-toolkit-1.0.0.jar")))
+
+    def test_non_zip_is_unknown(self):
+        with tempfile.TemporaryDirectory() as d:
+            junk = Path(d) / "dev-toolkit-1.0.0.jar"
+            junk.write_text("not a jar", encoding="utf-8")
+            self.assertIsNone(jar_has_layer_fix(junk))
 
 
 class TestParseMvn(unittest.TestCase):

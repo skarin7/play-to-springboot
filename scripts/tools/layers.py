@@ -28,7 +28,8 @@ the fix and will mis-migrate those files.
 
 from __future__ import annotations
 
-from pathlib import PurePosixPath
+import zipfile
+from pathlib import Path, PurePosixPath
 from typing import Iterable, NamedTuple
 
 LAYER_ORDER: tuple[str, ...] = (
@@ -97,6 +98,27 @@ def classify_legacy(path_relative_to_source_root: str) -> str:
     if "/repositories/" in path or "/dao/" in path:
         return "repository"
     return "other"
+
+
+# Shipped in the same commit as the LayerDetector segment-matching fix, so its
+# presence in a JAR is a reliable marker that the fix is in. The JAR filename is
+# hardcoded dev-toolkit-1.0.0.jar and never bumped, so the name cannot tell fixed
+# from unfixed builds -- and stale copies of the toolkit source still exist.
+_FIX_MARKER_CLASS = "com/phenom/devtoolkit/SignatureExtractor.class"
+
+
+def jar_has_layer_fix(jar_path: Path) -> bool | None:
+    """
+    True if the JAR post-dates the LayerDetector fix, False if it predates it,
+    None if it cannot be inspected (missing file, not a zip).
+
+    A zip entry lookup, so this costs nothing -- no JVM start-up.
+    """
+    try:
+        with zipfile.ZipFile(jar_path) as jar:
+            return _FIX_MARKER_CLASS in jar.namelist()
+    except (OSError, zipfile.BadZipFile):
+        return None
 
 
 class Divergence(NamedTuple):
