@@ -1,7 +1,7 @@
 # State contract
 
 How the roles coordinate. Read this before changing `migration-status.json` or
-adding a role.
+adding a role. Diagrams: [FLOW.md](FLOW.md).
 
 ## Single writer
 

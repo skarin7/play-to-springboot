@@ -1,7 +1,7 @@
 # Running a migration
 
-Step-by-step for the operator. For the schema and role contract, see
-[STATE-CONTRACT.md](STATE-CONTRACT.md).
+Step-by-step for the operator. Diagrams in [FLOW.md](FLOW.md); schema and role
+contract in [STATE-CONTRACT.md](STATE-CONTRACT.md).
 
 ## Phase 0 — one-time setup
 

@@ -31,6 +31,9 @@ manager → researcher → architect ──── GATE 1 (you approve the approa
 Sequential by design: the layer dependency order is real, and QA on
 half-migrated code is noise.
 
+Diagrams of the full flow, the dev/QA correction loop, and who writes what:
+**[docs/FLOW.md](docs/FLOW.md)**.
+
 ### Why the roles are split this way
 
 - The **researcher** runs first because the standard failure of coding agents is
