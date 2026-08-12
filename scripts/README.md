@@ -1,168 +1,104 @@
-# Migration orchestrator (`migration_orchestrator.py`)
+# Scripts
 
-Python **stdlib-only** driver for the Play → Spring pipeline: `dev-toolkit` **`migrate-app`** per layer, **`mvn compile`**, optional **`cursor-agent`** for compile fixes, **`source_inventory`** / **`migration_verification`** counts.
+Deterministic tooling. Sequencing and failure handling live in the
+`play-spring-manager` skill, not here.
 
-**State:** a single **`migration-status.json`** (no `pipeline_state.json`). Default path is **`<spring-repo>/migration-status.json`**, where **`spring-repo`** is resolved after **workspace preparation** (see below). Override with `--status-file` or `MIGRATION_STATUS_FILE`.
+The split is deliberate: agents count files inconsistently and re-derive regexes
+badly, while scripts are exact and cost nothing to run. Judgment goes to the
+agent; anything countable goes here.
 
-**First step (automatic):** each run **prepares the workspace** for **`--play-repo`**: Spring project directories, **`workspace.yaml`**, Cursor skills and kit files under **`<play-repo>/.cursor/`**, and copies **`dev-toolkit-1.0.0.jar`** from **`lib/`** into the play repo. This step is **idempotent**.
+## `migration_orchestrator.py`
 
-**Where to run from:** use the kit clone as your shell cwd, e.g. **`cd …/play-to-spring-kit`**, then **`python3 scripts/migration_orchestrator.py --play-repo ../your-play-app`**. The kit root (bootstrap script, **`lib/`**) is found via the script file path (**`__file__`**), not cwd. Relative **`--play-repo`** / **`--workspace`** values are resolved against **cwd**, so paths like **`../cms-content-service`** are correct when you launch from the kit directory.
-
-## Requirements
-
-- Python **3.10+**
-- **`java`**, **`mvn`** on `PATH`
-- **`dev-toolkit-1.0.0.jar`** in **`play-to-spring-kit/lib/`** (copied to `<play-repo>/` during workspace prep, or pass `--jar`)
-- **`cursor-agent`** on `PATH` if using LLM fixes (see Cursor docs for install)
-
-## Cursor / model
-
-1. Create a **Cursor User API Key** (dashboard → Integrations → User API Keys, `sk_...`).
-2. `export CURSOR_API_KEY="sk_..."`
-
-**Model** (`cursor-agent -m`):
-
-| Precedence | Source |
-|------------|--------|
-| 1 (highest) | `--cursor-model` |
-| 2 | `CURSOR_MODEL` or `MIGRATION_CURSOR_MODEL` |
-| 3 | `migration-status.json` → `autonomous.cursor_model` |
-| 4 (default) | **`composer-2`** |
-
-Confirm slugs with `cursor-agent --help` for your CLI version.
-
-**Headless agent** (what the script runs):
+Workspace setup and status reporting. Despite the name, it no longer orchestrates.
 
 ```bash
-cursor-agent -p -m composer-2 --output-format json --api-key "$CURSOR_API_KEY" "<prompt>"
+python3 scripts/migration_orchestrator.py setup  --play-repo ../my-play-app
+python3 scripts/migration_orchestrator.py status --play-repo ../my-play-app
+python3 scripts/migration_orchestrator.py verify --play-repo ../my-play-app
 ```
 
-Optional: `CURSOR_AGENT_TIMEOUT_SEC` (default **1800**) per agent invocation.
+Optional: `--workspace`, `--spring-repo`, `--spring-name`, and `--skip-routes`
+on `verify`.
 
-## Environment variables
+Kit paths resolve from the script's own location; `--play-repo` resolves against
+your shell's cwd.
 
-| Variable | Purpose |
-|----------|---------|
-| `PLAY_REPO` | Default `--play-repo` (Play project root) |
-| `SPRING_REPO` | Optional explicit Spring root (skips `workspace.yaml` / `spring-<basename>` resolution) |
-| `MIGRATION_STATUS_FILE` | Explicit status file path if set (only when `--status-file` is omitted) |
-| `CURSOR_API_KEY` | Required for `cursor-agent` (omit with `--no-cursor`) |
-| `CURSOR_MODEL` / `MIGRATION_CURSOR_MODEL` | Model slug |
-| `MAX_RETRIES_PER_LAYER` | Default 5 |
-| `MAX_TOTAL_LLM_CALLS` | Default 50 (whole run) |
-| `MAX_ERRORS_TO_SEND_LLM` | Default 10 (per prompt) |
-| `MAX_FILES_PER_FIX` | Default 3 (prompt instruction only) |
-| `TIMEOUT_PER_LAYER_MINS` | Default 30 (wall clock per layer) |
-| `MAX_FILES_PER_CURSOR_SESSION` | Default 10 (batch errors by file) |
+Exit codes: `0` OK, `1` error, `3` initialize not done.
 
-## Paths (after workspace preparation)
+### What was removed
 
-Preparation writes **`workspace.yaml`** under the **workspace** directory (default: **parent of the play repo**) with absolute **`spring_repo`** and **`play_repo`**.
+This file used to be 954 lines and ran the migration itself: a four-level Cursor
+model precedence chain, LLM call budgets, per-layer retry counters, a loop
+detector, and `cursor-agent` invocations with the API key passed on the command
+line (visible to any local `ps`).
 
-The orchestrator then resolves:
+All of it is gone. The coding agent makes those decisions now. The environment
+variables that configured it — `CURSOR_API_KEY`, `CURSOR_MODEL`,
+`MAX_TOTAL_LLM_CALLS`, `MAX_RETRIES_PER_LAYER`, and the rest — no longer do
+anything.
 
-1. **`--spring-repo`** or **`SPRING_REPO`** — if set, used as-is.
-2. Else **`spring_repo`** from **`<workspace>/workspace.yaml`**.
-3. Else **`<workspace>/spring-<play-dir-name>`**, or **`<workspace>/<--spring-name>`** if you pass **`--spring-name`**.
+## `setup.sh`
 
-**`--workspace`** / **`--spring-name`** — only when you use a non-default layout; both are passed through to the same install step the script runs at the start.
-
-## CLI usage
-
-Minimal (**only `--play-repo`**; workspace prep runs automatically). From inside the kit:
+Called by `migration_orchestrator.py setup`; usable directly.
 
 ```bash
-cd /path/to/play-to-spring-kit
-python3 scripts/migration_orchestrator.py --play-repo ../cms-content-service
+./scripts/setup.sh <path-to-play-repo> [--workspace <dir>] [--spring-name <name>]
 ```
 
-Or with an absolute play path from any cwd:
+Idempotent, and non-destructive: it copies over the kit reference rather than
+deleting it, so notes you add under `<play-repo>/.cursor/docs/` and custom agents
+under `.claude/agents/` survive re-runs.
+
+## `tools/` — helpers the agents call
+
+Each prints JSON to stdout and does one thing.
+
+| Tool | Purpose |
+|---|---|
+| `layers.py` | Layer classification; also detects a stale dev-toolkit JAR |
+| `inventory.py` | Per-layer counts for both trees; picks `collapsed`/`full` role mode |
+| `parse_mvn.py` | Maven log → structured errors, grouped by file, with signatures |
+| `signature_diff.py` | **T2** structural preservation |
+| `routes.py` | Play routes and Spring mappings; path normalization |
+| `verify.py` | Completeness plus **T3** route parity |
+| `state.py` | Atomic single-writer access to `migration-status.json` |
+| `token_report.py` | Measured token/cost accounting from Claude Code transcripts |
 
 ```bash
-python3 /path/to/play-to-spring-kit/scripts/migration_orchestrator.py \
-  --play-repo /path/to/cms-content-service
+python3 scripts/tools/test_tools.py     # 52 tests, stdlib only
 ```
 
-Custom workspace / Spring folder name:
+### `state.py`
+
+**Only the manager runs this.** Subagents report through artifacts and journals;
+two writers corrupt the file, and a subagent killed mid-write leaves JSON that
+cannot be resumed from.
 
 ```bash
-python3 scripts/migration_orchestrator.py \
-  --play-repo /path/to/play-project \
-  --workspace /path/to/workspace-dir \
-  --spring-name my-spring-app
+state.py --status-file S init
+state.py --status-file S show [--path layers.model]
+state.py --status-file S set --path layers.model.status --value done
+state.py --status-file S add-finding --json '{"layer":"service","file":"X.java","tier":"T2","severity":"blocker",...}'
+state.py --status-file S fold-journal --journal .migration/journal/service-dev.ndjson --layer service
+state.py --status-file S gate --name architecture --value approved
 ```
 
-Explicit overrides:
+Reads merge defaults, so a status file from an earlier version of the kit keeps
+every field it had and gains the new ones.
 
-```bash
-python3 scripts/migration_orchestrator.py \
-  --play-repo /path/to/play-project \
-  --spring-repo /path/to/spring-project \
-  --status-file /path/to/spring-project/migration-status.json
-```
+### `parse_mvn.py` signatures
 
-**Status file precedence:** `--status-file` → `MIGRATION_STATUS_FILE` → **`<spring-repo>/migration-status.json`**.
+The `signatures` array is an order-independent identity for a set of compile
+errors. Comparing it across attempts distinguishes a genuine stuck loop
+(identical set) from progress that exposed deeper errors (different set) — a
+distinction the old `is_looping` heuristic could not make, which is why it killed
+layers that were still advancing.
 
-Common flags:
+### `signature_diff.py` thresholds
 
-- `--batch-size N` — passed to `migrate-app`
-- `--no-cursor` — compile only; exit **2** if errors repeat (stuck detection) without improvement
-- `--fail-fast` — exit on first layer `loop_detected` / `max_retries` / `timeout`
-- `--dry-run` — print actions, no subprocess side effects (limited)
-- `--skip-inventory` — do not scan Play `app/` for `source_inventory`
-- `--refresh-inventory` — recompute `source_inventory` even if present
+Defaults: a method must lose more than 60% of its statements **and** end up with
+fewer than 3 before it is reported. Override with `--drop-ratio` and
+`--min-statements`, or per project in `decisions.md`.
 
-## Init gate
-
-If `initialize.status` in JSON is not **`done`**, the script exits **3** and **does not** modify the file. Generate `pom.xml`, `Application.java`, and `application.properties` first (builder / agent).
-
-## Exit codes
-
-| Code | Meaning |
-|------|---------|
-| 0 | Finished (see `migration_verification` in JSON) |
-| 1 | Unexpected error |
-| 2 | Stuck compile with `--no-cursor` (error count not decreasing for 3 runs) |
-| 3 | Initialize not done |
-| 4 | `budget_exhausted` (`total_llm_calls` ≥ max) |
-| 5 | `--fail-fast` stopped on layer failure |
-
-## Resuming
-
-Re-run the same command. Layers with `status: done` are skipped. State is written after major steps (atomic replace).
-
-## Overnight run
-
-```bash
-nohup python3 /path/to/play-to-spring-kit/scripts/migration_orchestrator.py \
-  --play-repo "$PLAY_REPO" \
-  > orchestrator.log 2>&1 &
-echo $! >> orchestrator.log
-tail -f orchestrator.log
-```
-
-## Gitignore (Spring repo)
-
-Ignore generated diagnostics:
-
-```
-.migration/
-```
-
-The script writes `errors-<layer>.json` under `<spring-repo>/.migration/`.
-
-## `migration-status.json` extensions
-
-The script merges backward-compatible fields:
-
-- **`autonomous`**: `total_llm_calls`, `max_total_llm_calls`, `cursor_model`, `max_files_per_cursor_session`, `last_errors_path`
-- **Per-layer** (in addition to existing keys): `retry_count`, `llm_calls`, `errors_history`, `failure_reason`, optional `compile_error_counts` (no-cursor stuck detection)
-- **`failed_layers`**: append-only summary entries on terminal failure
-- **`source_inventory`**: Play `app/**/*.java` counts by layer (LayerDetector rules)
-- **`migration_verification`**: after all layers processed, Spring vs Play file counts
-
-Layer order: **model → repository → manager → service → controller → other**.
-
-## Session resume (`cursor-agent`)
-
-Not implemented in v1. For long-lived fixes, see `cursor-agent ls` / `cursor-agent resume` in Cursor docs; future versions may persist `session_id`.
+Loosening them to silence findings defeats the check — the point is that it is
+quiet enough to be believed when it does fire.

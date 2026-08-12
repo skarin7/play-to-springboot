@@ -1,95 +1,120 @@
-# Play-to-Spring Orchestration: Steps for Cursor
+# Running a migration
 
-One **orchestrator agent** runs the migration in two phases, processing files **per-layer in dependency order**. Setup creates the Spring directory structure, copies `dev-toolkit-1.0.0.jar` to the Play repo root, and installs skills to `.cursor/skills/`.
+Step-by-step for the operator. Diagrams in [FLOW.md](FLOW.md); schema and role
+contract in [STATE-CONTRACT.md](STATE-CONTRACT.md).
 
-**Flow:** Orchestrator → (1) Initialize Spring project → (2) For each layer: transform via CLI → compile + fix until clean → **(3) Verify migration completeness** against `migration-status.json` **`source_inventory`**.
-
-The Spring repo’s **`migration-status.json`** should include **`source_inventory`**: recursive **`*.java`** counts under Play **`app/`** (totals and **per-layer** buckets aligned with dev-toolkit **`LayerDetector`**). After the final green **`mvn compile`**, the **Builder** skill’s verification step compares those baselines to Spring **`src/main/java`** counts and records **`migration_verification`**. See `skills/orchestrator-skill.md` and `skills/builder-skill.md`.
-
-## Orchestrator agent (single entry point)
-
-Invoke the **Orchestrator** skill (e.g. `/play-spring-orchestrator`). The orchestrator:
-
-1. **Initialize:** Read Play project's `build.sbt` and `conf/application.conf`; generate `pom.xml`, `Application.java`, and `application.properties` in the Spring repo.
-2. **Transform + Validate per layer:** For each layer (model → repository → manager → service → controller → other):
-   - Transform all files in the layer: `java -jar dev-toolkit-1.0.0.jar migrate-app --layer <layer>`
-   - Validate: `cd ../spring-<basename> && mvn compile`; fix errors; repeat until clean.
-   - Move to the next layer only when the current one compiles cleanly.
-3. **Verify:** Re-count Spring Java sources vs **`source_inventory`**; update **`migration_verification`** in `migration-status.json`; then mark migration done.
-
-**Placeholders:** `<play-repo>` = the Play project directory name; `spring-<basename>` = the Spring project directory created by setup.
-
----
-
-## Phase 0: One-time setup (before any migration)
-
-Do this once per Play repo.
-
-### 0.1 Build the transformer JAR (java-dev-toolkit)
+## Phase 0 — one-time setup
 
 ```bash
-cd /path/to/java-dev-toolkit
-mvn -q package
-# JAR is at: target/dev-toolkit-1.0.0.jar
-```
+# Build the transformer, if you have the toolkit source
+cd /path/to/java-dev-toolkit && mvn -q package
+cp target/dev-toolkit-1.0.0.jar /path/to/play-to-spring-kit/lib/
 
-### 0.2 Put the JAR in the kit and run setup
-
-```bash
-cp /path/to/java-dev-toolkit/target/dev-toolkit-1.0.0.jar /path/to/play-to-spring-kit/lib/
-
+# Prepare the workspace (idempotent; safe on every re-run)
 cd /path/to/play-to-spring-kit
-./scripts/setup.sh /path/to/<play-repo>
+python3 scripts/migration_orchestrator.py setup --play-repo ../your-play-app
 ```
 
-Setup creates the Spring directory structure (no `pom.xml` or source files — the agent generates those).
+This creates `spring-<basename>/`, copies the JAR into the Play repo, installs
+`.claude/skills/`, `.claude/agents/`, and `.cursor/skills/`, writes
+`workspace.yaml`, seeds `route-map.json` from `conf/routes`, creates
+`.migration/journal/`, and puts the Spring repo on a `migration/<name>` branch.
 
-### 0.3 Open in Cursor
+**Re-run setup after updating the kit.** The skills and agents installed under
+`<play-repo>/.claude/` are copies taken at setup time; they do not track later
+edits to the kit, and nothing warns you that they have drifted. Setup overwrites
+them, and re-running is safe — it preserves your own files under `.cursor/docs/`
+and any custom agents you added.
 
-- Open the **Play repo** (skills in `.cursor/skills/`; JAR at repo root).
-- Or open the **workspace directory** (parent of Play repo and `spring-<basename>`).
-
----
-
-## Phase 1: Initialize Spring project (LLM)
-
-The builder agent reads the Play project and generates:
-
-1. **`pom.xml`** — read `build.sbt` to map dependencies to Maven equivalents (e.g. MongoDB driver → `spring-boot-starter-data-mongodb`).
-2. **`application.properties`** — read `conf/application.conf` and map Play config keys to Spring equivalents.
-3. **`Application.java`** — `@SpringBootApplication` with `main()` in the base package.
-
----
-
-## Phase 2: Transform + Validate per layer (CLI + LLM)
-
-Process layers in dependency order: **model → repository → manager → service → controller → other**.
-
-For each layer, from the **Play repo** directory:
-
-### 2a. Transform
+Check the inventory before starting:
 
 ```bash
-java -jar dev-toolkit-1.0.0.jar migrate-app --layer model
+python3 scripts/migration_orchestrator.py status --play-repo ../your-play-app
 ```
 
-The CLI skips files that already exist in the target (idempotent). For large layers, use batching:
+If `toolkit_jar.status` is `stale`, the JAR in the Play repo predates the
+LayerDetector fix and will place the listed files in the wrong layer. Refresh it
+from `lib/` first. `current` needs no action.
+
+## Phase 1 — run the manager
+
+Open the **Play repo** in Claude Code:
+
+> Run the play-spring-manager skill for this workspace; resume from
+> migration-status.json if present.
+
+The manager works through: inventory → researcher → architect → **Gate 1**.
+
+## Gate 1 — approve the approach
+
+You get the architect's `decisions.md`: dependency map, config map, idiom
+decisions (notably the async policy), the `no_migration` list, and any concerns.
+
+This is the cheapest correction point in the run. Everything downstream compiles
+against these choices, so a wrong call here repeats in every layer.
+
+Approve, or send it back with corrections.
+
+## Phase 2 — initialize and dependency-check
+
+Dev generates `pom.xml`, `Application.java`, and `application.properties`. QA then
+compiles the project with **no sources migrated**. Zero code, but it proves every
+declared dependency resolves — a bad dependency map fails here in a minute rather
+than surfacing as strange compile errors four layers deep.
+
+## Phase 3 — the layer loop
+
+Order: **model → repository → manager → service → controller → other**.
+
+Per layer: dev transforms and fixes → QA runs T1/T2 (plus T3 after controllers) →
+findings go back to dev with evidence attached → when QA passes, the manager
+commits.
+
+**Gate 2** fires after the `model` layer: read the three or so generated files. If
+the idiom is wrong, it is wrong in three files rather than in all of them.
+
+Layers after that do not stop by default. Set `gates.mode: strict` in
+`migration-status.json` to review every layer.
+
+## Gate 3 — escalation
+
+The manager stops and writes `.migration/escalation-<layer>.md` when any of:
+
+- a layer reaches 3 attempts
+- QA reports a T2 blocker (a public method disappeared)
+- `git -C <play-repo> status --porcelain` is non-empty (dev touched the Play repo)
+
+The file holds the open findings, the last three error-signature sets, and what
+dev tried. Read that rather than the transcript.
+
+## Gate 4 — merge
+
+Final T1–T4 plus completeness and route parity. Counts do not need to match
+exactly: files in `no_migration` are subtracted from the baseline, and extra
+Spring files (config, error handlers) are expected.
+
+## Resuming
+
+Re-run the same manager invocation. Completed layers are skipped, the transformer
+skips files already present in the target, and a dev subagent killed mid-layer is
+picked up from its journal.
+
+## Checking on it yourself
 
 ```bash
-java -jar dev-toolkit-1.0.0.jar migrate-app --layer service --batch-size 15
+# counts, gate status, open findings
+python3 scripts/migration_orchestrator.py status --play-repo ../your-play-app
+
+# completeness and route parity
+python3 scripts/migration_orchestrator.py verify --play-repo ../your-play-app
+
+# structural preservation for one layer
+java -jar dev-toolkit-1.0.0.jar signature <play>/app             > /tmp/p.json
+java -jar dev-toolkit-1.0.0.jar signature <spring>/src/main/java > /tmp/s.json
+python3 scripts/tools/signature_diff.py --play /tmp/p.json --spring /tmp/s.json --layer service
 ```
 
-CLI output: `"migrate-app done: N files, M errors, R remaining"`.
-
-### 2b. Validate
-
-```bash
-cd ../spring-<basename> && mvn compile
-```
-
-If errors: fix in Spring project (imports, Play→Spring mapping, missing deps in `pom.xml`), re-run `mvn compile`, repeat until it passes. Then move to the next layer.
-
-### Layer order
+## Layer order
 
 | Order | Layer | Why |
 |-------|-------|-----|
@@ -98,25 +123,9 @@ If errors: fix in Spring project (imports, Play→Spring mapping, missing deps i
 | 3 | manager | Depends on models and repositories. |
 | 4 | service | Depends on models, repositories, managers. |
 | 5 | controller | Depends on services, managers, models. |
-| 6 | other | Config, utilities, anything not classified above. |
+| 6 | other | Config, utilities, anything unclassified. |
 
----
-
-## State tracking — `migration-status.json`
-
-The orchestrator maintains `<spring-repo>/migration-status.json` to track progress and enable resumability. On re-invoke, the orchestrator skips completed steps/layers and resumes from the first incomplete one.
-
----
-
-## Summary
-
-| Step | Action |
-|------|--------|
-| 1 | Initialize: read `build.sbt` + `application.conf` → generate `pom.xml`, `Application.java`, `application.properties`. |
-| 2 | For each layer: `migrate-app --layer X` → `mvn compile` + fix until clean → next layer. |
-
-## End-to-end checklist
-
-- [ ] **Phase 0:** Build dev-toolkit JAR; put in `play-to-spring-kit/lib/`; run `./scripts/setup.sh <play-repo>`.
-- [ ] **Phase 1:** Agent reads `build.sbt` + `application.conf` → generates `pom.xml`, `Application.java`, `application.properties`.
-- [ ] **Phase 2:** For each layer: `migrate-app --layer <layer>` → `mvn compile` → fix → repeat until clean → next layer.
+Classification is by path segment: `controllers/`, `service/`|`services/`,
+`models/` or `*Model.java`, `db/`, `repositories/`|`dao/`, else `other`. Note that
+`db/` is tested before `repositories/`, so `db/repositories/Foo.java` classifies
+as `manager`.
