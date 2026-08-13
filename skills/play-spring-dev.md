@@ -81,6 +81,21 @@ as a `dependency-error` finding pointed back at the architect.
 
 ## Task B: transform a layer
 
+### Layer overrides
+
+Before running the bulk transform below, check `.migration/layer-overrides.json`
+for entries whose corrected layer is `<layer>`. For each, run the single-file
+form individually first:
+
+```bash
+java -jar dev-toolkit-1.0.0.jar transform --input <play-file> --output <spring-file> --layer <layer>
+```
+
+This creates the output file at its *corrected* layer's location. The bulk
+`migrate-app` pass below skips files whose output already exists, so when it
+later reaches the file's *original* auto-detected layer it won't re-touch or
+misclassify it.
+
 From the **Play repo** directory:
 
 ```bash

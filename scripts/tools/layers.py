@@ -28,6 +28,7 @@ the fix and will mis-migrate those files.
 
 from __future__ import annotations
 
+import json
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Iterable, NamedTuple
@@ -46,13 +47,20 @@ def _posix_lower(relative_path: str) -> str:
     return str(relative_path).replace("\\", "/").lower()
 
 
-def classify(relative_path: str) -> str:
+def classify(relative_path: str, overrides: dict[str, str] | None = None) -> str:
     """
     Segment-based classification. Correct for both flat and packaged layouts.
 
     ``relative_path`` may be relative to the repo root or to the Java source
     root; segment matching makes the distinction irrelevant, which is precisely
     what the substring version got wrong.
+
+    ``overrides`` is the human-authored correction map from
+    ``.migration/layer-overrides.json`` (see ``load_overrides``), for repos whose
+    layout doesn't use the conventional segment names. An exact-path entry wins
+    outright; otherwise the longest directory-prefix entry (a key ending in
+    ``/`` that the path starts with) wins; otherwise fall through to the segment
+    rules below unchanged.
 
     The if-chain below mirrors ``LayerDetector.classify`` branch for branch,
     including the ``*Model.java`` convention sharing a branch with ``models/``
@@ -61,6 +69,16 @@ def classify(relative_path: str) -> str:
     ``migrate-app`` will do, which is the failure this module exists to prevent.
     """
     path = _posix_lower(relative_path)
+
+    if overrides:
+        if path in overrides:
+            return overrides[path]
+        prefix_matches = [
+            key for key in overrides if key.endswith("/") and path.startswith(key)
+        ]
+        if prefix_matches:
+            return overrides[max(prefix_matches, key=len)]
+
     parts = PurePosixPath(path).parts
     directories = set(parts[:-1])
     file_name = parts[-1] if parts else ""
@@ -76,6 +94,20 @@ def classify(relative_path: str) -> str:
     if "repositories" in directories or "dao" in directories:
         return "repository"
     return "other"
+
+
+def load_overrides(path: Path) -> dict[str, str]:
+    """
+    Read the human-authored layer-override map, or ``{}`` if absent.
+
+    Absence is not an error -- most repos never need this file. Keys are
+    normalized through the same ``_posix_lower`` used everywhere else in this
+    module, so matching is consistent regardless of how the human typed the path.
+    """
+    if not path.is_file():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return {_posix_lower(k): v for k, v in data.items()}
 
 
 def classify_legacy(path_relative_to_source_root: str) -> str:

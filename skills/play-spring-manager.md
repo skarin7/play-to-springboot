@@ -63,6 +63,10 @@ wrong layer — controllers land in `other` and never receive `@RestController`.
 Refresh the JAR from the kit's `lib/` before going further. `current` needs no
 action; `not_found` means run setup.
 
+Check `classification_smell.other_pct`. Above 15% (or a recurring unmapped
+directory appears in `common_unmapped_dirs`), surface it before Gate 1 so the
+architect can draft `.migration/layer-overrides.json`.
+
 ### 2. Researcher
 
 Dispatch the `play-spring-researcher` subagent. It writes `.migration/research.md`
@@ -102,8 +106,11 @@ controller → other**.
 For each layer not already `done`:
 
 1. Dispatch `play-spring-dev` with the layer name and paths to `research.md` and
-   `decisions.md`. **Dev owns the compile**: it transforms, runs `mvn compile`,
-   and fixes until the build is clean or it has an honest blocker.
+   `decisions.md`. If `.migration/layer-overrides.json` has entries targeting
+   this layer not yet migrated, tell dev to handle those individually first
+   (see dev's Task B), before the bulk transform. **Dev owns the compile**: it
+   transforms, runs `mvn compile`, and fixes until the build is clean or it has
+   an honest blocker.
 2. Fold its journal: `state.py fold-journal --journal .migration/journal/<layer>-dev.ndjson --layer <layer>`
 3. Run the gate yourself:
 

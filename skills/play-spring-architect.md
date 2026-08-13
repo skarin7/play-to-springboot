@@ -96,6 +96,14 @@ or migrate that file out of band. Note that `db/` is matched before
 `repositories/`, so `db/repositories/Foo.java` classifies as `manager` — usually
 harmless, occasionally wrong for dependency order.
 
+If inventory's `classification_smell` flags a high `other_pct` (default warn
+threshold 15%) or a recurring unmapped directory name, draft
+`.migration/layer-overrides.json`: prefix entries (keys ending in `/`) for whole
+misnamed directories, exact-path entries for individually blurred files — e.g. a
+`utils/` file that is really a repository. Present it alongside `decisions.md`
+at Gate 1. This is a correction, not a smarter classifier — every entry must
+reflect what the file actually is, not a shortcut to silence the warning.
+
 ## `decisions.md` format
 
 ```markdown
@@ -115,6 +123,9 @@ harmless, occasionally wrong for dependency order.
 
 ## no_migration
 - Module.java — Guice bindings; Spring component scanning replaces it
+
+## Layer overrides
+- see `.migration/layer-overrides.json` — <one line on why the smell fired, e.g. "app/web/ is this repo's controller directory">
 
 ## T2 thresholds (optional)
 drop_ratio: 0.6   min_statements: 3

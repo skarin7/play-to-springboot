@@ -39,9 +39,9 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from layers import classify
+    from layers import classify, load_overrides
 except ImportError:
-    from .layers import classify
+    from .layers import classify, load_overrides
 
 DEFAULT_DROP_RATIO = 0.6
 DEFAULT_MIN_STATEMENTS = 3
@@ -70,7 +70,9 @@ def index_by_class(tree: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return out
 
 
-def filter_by_layer(tree: dict[str, Any], layer: str) -> dict[str, Any]:
+def filter_by_layer(
+    tree: dict[str, Any], layer: str, overrides: dict[str, str] | None = None
+) -> dict[str, Any]:
     """
     Keep only entries whose path classifies into ``layer``.
 
@@ -82,7 +84,7 @@ def filter_by_layer(tree: dict[str, Any], layer: str) -> dict[str, Any]:
         key: entry
         for key, entry in tree.items()
         if isinstance(entry, dict)
-        and classify(entry.get("path") or key) == layer
+        and classify(entry.get("path") or key, overrides) == layer
     }
 
 
@@ -182,9 +184,10 @@ def diff(
     min_statements: int = DEFAULT_MIN_STATEMENTS,
     no_migration: set[str] | None = None,
     layer_only: bool = False,
+    overrides: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     no_migration = no_migration or set()
-    scoped_play = filter_by_layer(play_tree, layer) if layer_only else play_tree
+    scoped_play = filter_by_layer(play_tree, layer, overrides) if layer_only else play_tree
     play_classes = index_by_class(scoped_play)
     spring_classes = index_by_class(spring_tree)
 
@@ -244,6 +247,12 @@ def main() -> int:
         default=None,
         help="Read architecture_review.no_migration from here.",
     )
+    parser.add_argument(
+        "--layer-overrides",
+        type=Path,
+        default=None,
+        help="Path to .migration/layer-overrides.json (default: none).",
+    )
     args = parser.parse_args()
 
     no_migration: set[str] = set()
@@ -256,6 +265,8 @@ def main() -> int:
         except json.JSONDecodeError as e:
             print(f"[warn] could not read status file: {e}", file=sys.stderr)
 
+    overrides = load_overrides(args.layer_overrides) if args.layer_overrides else {}
+
     result = diff(
         load_tree(args.play),
         load_tree(args.spring),
@@ -264,6 +275,7 @@ def main() -> int:
         args.min_statements,
         no_migration,
         args.layer_only,
+        overrides,
     )
     json.dump(result, sys.stdout, indent=2)
     sys.stdout.write("\n")

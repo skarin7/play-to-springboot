@@ -25,10 +25,10 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from layers import LAYER_ORDER, classify, empty_counts
+    from layers import LAYER_ORDER, classify, empty_counts, load_overrides
     from routes import compare_routes, parse_play_routes, parse_spring_mappings
 except ImportError:
-    from .layers import LAYER_ORDER, classify, empty_counts
+    from .layers import LAYER_ORDER, classify, empty_counts, load_overrides
     from .routes import compare_routes, parse_play_routes, parse_spring_mappings
 
 
@@ -36,7 +36,9 @@ def iso_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def scan_counts(source_root: Path, exclude: set[str]) -> tuple[dict[str, int], int]:
+def scan_counts(
+    source_root: Path, exclude: set[str], overrides: dict[str, str] | None = None
+) -> tuple[dict[str, int], int]:
     counts = empty_counts()
     total = 0
     if not source_root.is_dir():
@@ -47,7 +49,7 @@ def scan_counts(source_root: Path, exclude: set[str]) -> tuple[dict[str, int], i
         rel = str(f.relative_to(source_root))
         if rel in exclude or f.name in exclude:
             continue
-        counts[classify(rel)] += 1
+        counts[classify(rel, overrides)] += 1
         total += 1
     return counts, total
 
@@ -111,6 +113,12 @@ def main() -> int:
         help="Read architecture_review.no_migration from here, in addition to --no-migration.",
     )
     parser.add_argument(
+        "--layer-overrides",
+        type=Path,
+        default=None,
+        help="Path to layer-overrides.json (default: <spring-repo>/.migration/layer-overrides.json).",
+    )
+    parser.add_argument(
         "--skip-routes",
         action="store_true",
         help="Skip T3 route parity (meaningless before the controller layer runs).",
@@ -134,14 +142,19 @@ def main() -> int:
             print(f"[warn] could not read status file: {e}", file=sys.stderr)
 
     play_root = args.play_repo.expanduser().resolve() / args.play_java_root
-    spring_root = args.spring_repo.expanduser().resolve() / "src" / "main" / "java"
+    spring_repo = args.spring_repo.expanduser().resolve()
+    spring_root = spring_repo / "src" / "main" / "java"
 
     if not play_root.is_dir():
         print(f"ERROR: no Play Java root at {play_root}", file=sys.stderr)
         return 1
 
-    play_counts, play_total = scan_counts(play_root, exclude)
-    spring_counts, spring_total = scan_counts(spring_root, set())
+    overrides = load_overrides(
+        args.layer_overrides or (spring_repo / ".migration" / "layer-overrides.json")
+    )
+
+    play_counts, play_total = scan_counts(play_root, exclude, overrides)
+    spring_counts, spring_total = scan_counts(spring_root, set(), overrides)
 
     status, layer_comparison, notes = compare(play_counts, spring_counts)
 

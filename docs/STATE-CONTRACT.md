@@ -128,6 +128,7 @@ keeps all its fields and gains the new ones. Legacy keys (`autonomous`,
   "architecture_review": {
     "status": "pending | approved | revise",
     "decisions": ".migration/decisions.md",
+    "layer_overrides": ".migration/layer-overrides.json",  // optional, see below
     "no_migration": ["Module.java"],   // subtracted by verify.py and signature_diff.py
     "concerns": []
   },
@@ -171,6 +172,33 @@ of a retry.
 `no_migration` is load-bearing in the other direction: without it, Play-only glue
 like `Module.java` shows as a permanent shortfall on every run, and a check that
 always complains is a check nobody reads.
+
+### `layer_overrides` corrects classification, not completeness
+
+`.migration/layer-overrides.json` is optional and human-authored, drafted at
+Gate 1 when inventory's `classification_smell` flags a high `other_pct` or a
+recurring unmapped directory — a Play repo that doesn't use the conventional
+`controllers/`/`service/`/`models/`/`db/`/`repositories/`/`dao/` segment names.
+Both exact paths and directory prefixes are allowed; exact always wins, longest
+prefix wins otherwise. Paths are relative to the Java source root — `app/` for
+Play, the same form `LayerDetector`/`classify()` already receive everywhere
+else in this module — not to the repo root:
+
+```json
+{
+  "web/": "controller",
+  "utils/PricingHelper.java": "service"
+}
+```
+
+`layers.py`'s `load_overrides()` reads it and `classify()` applies it before
+falling through to the segment rules. It is threaded into `gate.py` (T2 layer
+scoping, cross-layer error attribution), `verify.py` (completeness counts), and
+`signature_diff.py` (T2 standalone). No JAR/`LayerDetector` change is involved —
+the dev-toolkit JAR has no override hook — so routing an override-mapped file to
+its corrected layer happens in the dev skill: `transform --layer <corrected>`
+runs for that file individually *before* the bulk `migrate-app` pass, which then
+skips it because the output already exists.
 
 ## Gates
 

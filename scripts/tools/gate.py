@@ -42,13 +42,13 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from layers import LAYER_ORDER, classify
+    from layers import LAYER_ORDER, classify, load_overrides
     from parse_mvn import summarize
     from routes import compare_routes, parse_play_routes, parse_spring_mappings
     from signature_diff import diff as signature_diff
     from signature_diff import load_tree
 except ImportError:
-    from .layers import LAYER_ORDER, classify
+    from .layers import LAYER_ORDER, classify, load_overrides
     from .parse_mvn import summarize
     from .routes import compare_routes, parse_play_routes, parse_spring_mappings
     from .signature_diff import diff as signature_diff
@@ -174,6 +174,7 @@ def tier_preservation(
     no_migration: set[str],
     layer_only: bool,
     refresh_cache: bool = False,
+    overrides: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     if not jar.is_file():
         return {"status": "error", "reason": f"dev-toolkit JAR not found at {jar}"}
@@ -197,6 +198,7 @@ def tier_preservation(
         layer,
         no_migration=no_migration,
         layer_only=layer_only,
+        overrides=overrides,
     )
 
 
@@ -257,7 +259,11 @@ def test_findings(t4: dict[str, Any], layer: str) -> list[dict[str, Any]]:
 
 
 def escalation_reasons(
-    tiers: dict[str, Any], findings: list[dict[str, Any]], done_layers: set[str], layer: str
+    tiers: dict[str, Any],
+    findings: list[dict[str, Any]],
+    done_layers: set[str],
+    layer: str,
+    overrides: dict[str, str] | None = None,
 ) -> list[str]:
     """
     When is a QA agent actually worth a dispatch?
@@ -278,10 +284,10 @@ def escalation_reasons(
     # will thrash in the wrong file.
     foreign = sorted(
         {
-            classify(f["file"])
+            classify(f["file"], overrides)
             for f in findings
-            if f["tier"] == "T1" and classify(f["file"]) in done_layers
-            and classify(f["file"]) != layer
+            if f["tier"] == "T1" and classify(f["file"], overrides) in done_layers
+            and classify(f["file"], overrides) != layer
         }
     )
     if foreign:
@@ -326,6 +332,12 @@ def main() -> int:
     )
     parser.add_argument("--jar", type=Path, default=None)
     parser.add_argument("--status-file", type=Path, default=None)
+    parser.add_argument(
+        "--layer-overrides",
+        type=Path,
+        default=None,
+        help="Path to layer-overrides.json (default: <spring-repo>/.migration/layer-overrides.json).",
+    )
     parser.add_argument(
         "--tiers",
         default=None,
@@ -374,6 +386,9 @@ def main() -> int:
         except json.JSONDecodeError as e:
             print(f"[warn] could not read {status_file}: {e}", file=sys.stderr)
 
+    layer_overrides_path = args.layer_overrides or (migration_dir / "layer-overrides.json")
+    overrides = load_overrides(layer_overrides_path)
+
     # Tier schedule. T3 cannot pass before controllers exist and T4 cannot run
     # before the whole project compiles, so running them earlier manufactures
     # failures that teach the reader to ignore the gate.
@@ -400,6 +415,7 @@ def main() -> int:
             play_root, spring_root, jar, layer, cache_dir, no_migration,
             layer_only=not args.final and layer in LAYER_ORDER,
             refresh_cache=args.refresh_cache,
+            overrides=overrides,
         )
         findings.extend(tiers["T2"].get("findings") or [])
     else:
@@ -417,7 +433,7 @@ def main() -> int:
     else:
         tiers["T4"] = skipped("tests run at final only")
 
-    reasons = escalation_reasons(tiers, findings, done_layers, layer)
+    reasons = escalation_reasons(tiers, findings, done_layers, layer, overrides)
     result = {
         "layer": layer,
         "checked_at": iso_now(),
