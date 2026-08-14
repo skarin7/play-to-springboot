@@ -2160,5 +2160,195 @@ class TestGapReport(unittest.TestCase):
             self.assertIn("boot_failure", out.read_text(encoding="utf-8"))
 
 
+class TestRunMetrics(unittest.TestCase):
+    """
+    What the run cost. A report that only says the migration worked cannot
+    answer whether it would still be affordable on a repo ten times the size.
+    """
+
+    TOOL = Path(__file__).resolve().parent / "state.py"
+
+    def _run(self, *args) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(self.TOOL), *args], capture_output=True, text=True
+        )
+
+    def test_init_stamps_started_at_once_and_keeps_it_on_resume(self):
+        with tempfile.TemporaryDirectory() as d:
+            status = Path(d) / "migration-status.json"
+            self.assertEqual(self._run("init", "--status-file", str(status)).returncode, 0)
+            first = json.loads(status.read_text())["run_metrics"]["started_at"]
+            self.assertIsNotNone(first)
+            self._run("init", "--status-file", str(status))
+            # A resumed run measures the whole migration, not the fragment
+            # after the last interruption.
+            self.assertEqual(
+                json.loads(status.read_text())["run_metrics"]["started_at"], first
+            )
+
+    def test_init_records_the_session_for_scoped_token_accounting(self):
+        with tempfile.TemporaryDirectory() as d:
+            status = Path(d) / "migration-status.json"
+            self._run("init", "--status-file", str(status),
+                      "--session-id", "abc-123", "--transcript-project", d)
+            rm = json.loads(status.read_text())["run_metrics"]
+            self.assertEqual(rm["session_id"], "abc-123")
+            self.assertEqual(rm["transcript_project"], d)
+
+    def test_add_dispatch_appends_and_requires_a_role(self):
+        with tempfile.TemporaryDirectory() as d:
+            status = Path(d) / "migration-status.json"
+            self._run("init", "--status-file", str(status))
+            ok = self._run("add-dispatch", "--status-file", str(status),
+                           "--json", '{"role":"dev","layer":"service",'
+                                     '"duration_ms":195379,"tokens":53462}')
+            self.assertEqual(ok.returncode, 0, ok.stderr)
+            self.assertEqual(ok.stdout.strip(), "1")
+            bad = self._run("add-dispatch", "--status-file", str(status),
+                            "--json", '{"layer":"service"}')
+            self.assertNotEqual(bad.returncode, 0)
+            rows = json.loads(status.read_text())["run_metrics"]["dispatches"]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["tokens"], 53462)
+            self.assertIsNotNone(rows[0]["at"])
+            self.assertIsNone(rows[0]["mode"])  # filled in, not left missing
+
+    def test_finish_computes_duration_from_started_at(self):
+        with tempfile.TemporaryDirectory() as d:
+            status = Path(d) / "migration-status.json"
+            self._run("init", "--status-file", str(status))
+            data = json.loads(status.read_text())
+            data["run_metrics"]["started_at"] = "2026-08-14T18:00:00Z"
+            status.write_text(json.dumps(data), encoding="utf-8")
+            proc = self._run("finish", "--status-file", str(status))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            rm = json.loads(status.read_text())["run_metrics"]
+            self.assertIsNotNone(rm["finished_at"])
+            self.assertGreater(rm["duration_seconds"], 0)
+
+    def test_finish_without_a_start_does_not_invent_a_duration(self):
+        with tempfile.TemporaryDirectory() as d:
+            status = Path(d) / "migration-status.json"
+            status.write_text(json.dumps({"run_metrics": {"started_at": None}}),
+                              encoding="utf-8")
+            self.assertEqual(self._run("finish", "--status-file", str(status)).returncode, 0)
+            self.assertIsNone(
+                json.loads(status.read_text())["run_metrics"]["duration_seconds"]
+            )
+
+    def test_duration_formats_readably(self):
+        self.assertEqual(report.fmt_duration(45), "45s")
+        self.assertEqual(report.fmt_duration(605), "10m 5s")
+        self.assertEqual(report.fmt_duration(3725), "1h 2m 5s")
+        self.assertEqual(report.fmt_duration(None), "")
+
+    def test_report_renders_wall_clock_and_dispatch_rows(self):
+        html = report.render_run_cost({
+            "started_at": "2026-08-14T18:00:00Z",
+            "finished_at": "2026-08-14T18:20:00Z",
+            "duration_seconds": 1200,
+            "dispatches": [
+                {"role": "architect", "layer": None, "mode": None,
+                 "duration_ms": 286194, "tokens": 54457, "tool_uses": 35},
+                {"role": "dev", "layer": "service", "mode": "transform",
+                 "duration_ms": 195379, "tokens": 53462, "tool_uses": 27},
+            ],
+            "tokens": None,
+        })
+        self.assertIn("20m 0s", html)
+        self.assertIn("architect", html)
+        self.assertIn("54,457", html)
+        self.assertIn("4m 46s", html)  # 286194 ms, per-dispatch
+
+    def test_report_says_so_when_token_accounting_is_unavailable(self):
+        html = report.render_run_cost({"started_at": None, "dispatches": []})
+        # Silence would read as "this run cost nothing".
+        self.assertIn("No token accounting", html)
+
+    def test_report_renders_measured_token_totals(self):
+        html = report.render_run_cost({
+            "duration_seconds": 60,
+            "dispatches": [],
+            "tokens": {
+                "scope": "session",
+                "sessions_counted": 1,
+                "by_agent": {
+                    "main": {"turns": 20, "input": 1000, "output": 500,
+                             "cache_write": 200, "cache_read": 30000, "cost_usd": 0.03},
+                    "subagent": {"turns": 40, "input": 2000, "output": 900,
+                                 "cache_write": 400, "cache_read": 60000, "cost_usd": 0.06},
+                },
+                "total": {"turns": 60, "input": 3000, "output": 1400,
+                          "cache_write": 600, "cache_read": 90000, "cost_usd": 0.09},
+                "manager_input_share_pct": 33.7,
+                "prices_usd_per_mtok": {},
+            },
+        })
+        self.assertIn("$0.09", html)
+        self.assertIn("33.7%", html)
+        self.assertIn("90,000", html)
+
+    def test_dispatch_tokens_fill_in_when_the_transcript_has_no_sidechain_turns(self):
+        """
+        With in-process subagents the session file holds main-thread turns only.
+        Reporting that as a 100% manager share reads as "the dispatches were
+        free", on a run where they were a third of the spend.
+        """
+        html = report.render_run_cost({
+            "duration_seconds": 60,
+            "dispatches": [{"role": "dev", "duration_ms": 1000, "tokens": 100_000}],
+            "tokens": {
+                "scope": "session", "sessions_counted": 1,
+                "by_agent": {
+                    "main": {"turns": 10, "input": 100, "output": 900,
+                             "cache_write": 0, "cache_read": 99_000, "cost_usd": 0.05},
+                    "subagent": {"turns": 0, "input": 0, "output": 0,
+                                 "cache_write": 0, "cache_read": 0, "cost_usd": 0.0},
+                },
+                "total": {"turns": 10, "input": 100, "output": 900,
+                          "cache_write": 0, "cache_read": 99_000, "cost_usd": 0.05},
+                "manager_input_share_pct": 100.0,
+                "prices_usd_per_mtok": {},
+            },
+        })
+        self.assertIn("from dispatch records", html)
+        self.assertIn("100,000", html)
+        self.assertIn("101,000", html)  # headline folds both sources in, minus cache reads
+        self.assertNotIn("share of input: 100.0%", html)
+        # main fresh = 100 in + 900 out; dispatches = 100k. Cache reads are left
+        # out of both sides or the share is ~99% on every non-trivial run.
+        self.assertIn("excluding cache reads: 1.0%", html)
+
+    def test_cache_reads_do_not_inflate_the_headline_token_count(self):
+        html = report.render_run_cost({
+            "duration_seconds": 60, "dispatches": [],
+            "tokens": {
+                "scope": "session", "sessions_counted": 1,
+                "by_agent": {"main": {"turns": 5, "input": 1_000, "output": 2_000,
+                                      "cache_write": 3_000, "cache_read": 9_000_000,
+                                      "cost_usd": 4.5}},
+                "total": {"turns": 5, "input": 1_000, "output": 2_000,
+                          "cache_write": 3_000, "cache_read": 9_000_000, "cost_usd": 4.5},
+                "manager_input_share_pct": None, "prices_usd_per_mtok": {},
+            },
+        })
+        self.assertIn("6,000", html)        # fresh tokens, the comparable number
+        self.assertIn("9,000,000", html)    # cache reads, reported separately
+        self.assertNotIn("9,006,000", html)
+
+    def test_collect_tokens_returns_none_when_transcripts_are_missing(self):
+        with tempfile.TemporaryDirectory() as d:
+            # Never a crash: a moved log directory must not take the report down.
+            self.assertIsNone(report.collect_tokens(Path(d) / "nope", None))
+
+    def test_full_report_carries_a_run_cost_section(self):
+        html = report.render_report(
+            {"layers": {}, "run_metrics": {"duration_seconds": 90, "dispatches": []}},
+            None, "2026-08-14T00:00:00Z",
+        )
+        self.assertIn("Run cost", html)
+        self.assertIn("1m 30s", html)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

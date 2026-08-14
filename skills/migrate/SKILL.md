@@ -86,7 +86,7 @@ single path).
 | `python3 "$CLAUDE_PLUGIN_ROOT/scripts/migration_orchestrator.py" setup --play-repo P` | Workspace scaffolding: Spring repo skeleton, `workspace.yaml`, `.migration/` |
 | `python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/fetch_jar.py"` | Fetch/checksum-verify/cache the dev-toolkit jar; prints its path |
 | `python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/inventory.py" --play-repo P [--spring-repo S]` | File counts per layer; picks `collapsed`/`full` mode |
-| `python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/state.py" --status-file S <sub>` | `init`, `show`, `set`, `add-finding`, `fold-journal`, `gate`, `bump-attempt` — see **Exact invocations** below |
+| `python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/state.py" --status-file S <sub>` | `init`, `show`, `set`, `add-finding`, `fold-journal`, `gate`, `bump-attempt`, `add-dispatch`, `finish` — see **Exact invocations** below |
 | `python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/guard.py" check --play-repo P --spring-repo S` | Play-repo read-only guard; `clean`/`tampered`/`error` |
 | `python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/gate.py" --play-repo P --spring-repo S --layer L --jar J` | **The verification gate**: guard, then T1–T4 in one call |
 | `python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/verify.py" --play-repo P --spring-repo S --status-file S` | Completeness (counts + routes) |
@@ -108,7 +108,7 @@ printed. Every tool also answers `--help` with its own examples.
 
 ```bash
 # state.py — --status-file works before or after the subcommand
-state.py init         --status-file S
+state.py init         --status-file S [--session-id <uuid> --transcript-project <manager-cwd>]
 state.py show         --status-file S [--path layers.service]
 state.py set          --status-file S --path layers.service.status --value done
 state.py set          --status-file S --path run_config.skip_t5 --value true
@@ -119,6 +119,10 @@ state.py fold-journal --status-file S --journal .migration/journal/service-dev.n
 state.py gate         --status-file S --name architecture --value approved
 state.py bump-attempt --status-file S --layer service [--signatures '["sig-a","sig-b"]']
 state.py bump-attempt --status-file S --layer service --reset   # after a batch passes
+state.py add-dispatch --status-file S --json '{"role":"dev","layer":"service",
+                       "mode":"transform","duration_ms":195379,"tokens":53462,
+                       "tool_uses":27}'
+state.py finish       --status-file S   # stamps finished_at + duration_seconds
 
 # gate.py — guard runs first; exit 4 is a halt, not a failure
 gate.py --play-repo P --spring-repo S --layer init --tiers T1 --jar J
@@ -169,6 +173,19 @@ run — every later `--jar` flag and every dev dispatch brief uses that same
 path. Don't re-derive it per layer. If it fails (checksum mismatch, network
 error), that's an environment halt: stop and report the error, don't retry
 silently.
+
+Run `state.py init` with the run's identity attached, so the report can price
+the run afterwards:
+
+```bash
+state.py init --status-file S --session-id <uuid> --transcript-project <your cwd>
+```
+
+Your scratchpad path ends in the session uuid — that's where to read it from.
+Without it, `report.py` counts every session recorded for the project and says
+so, which over-reports a run that shared a project directory with other work.
+`started_at` is stamped once and survives a resume, so the duration measures
+the migration rather than the fragment after the last interruption.
 
 ### 2. Inventory and mode
 
@@ -401,17 +418,31 @@ This does **not** wait for human approval — there is exactly one gate in this
 run, and it already happened at step 4. Instead:
 
 ```bash
+python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/state.py" finish \
+    --status-file <spring>/migration-status.json
 python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/report.py" \
-    --status-file <spring>/migration-status.json --out <spring>/.migration/report.html
+    --status-file <spring>/migration-status.json --out <spring>/.migration/report.html \
+    --token-project <your cwd> --session <uuid>
 ```
+
+`finish` closes the wall clock; run it *before* the report or the report shows
+a run that never ended. `report.py` then measures token usage from the session
+transcripts itself and renders a **Run cost** section — wall clock, one row per
+dispatch, and main-thread vs subagent token totals with a list-price estimate.
+It reads those transcripts, it never writes them, and it does not write the
+status file either: you stay the only writer. If the transcripts aren't
+reachable the section says so rather than rendering a zero, because a zero
+reads as "this run was free". The `--token-project` / `--session` flags default
+to whatever `init` recorded, so passing them again is belt and braces.
 
 Then print a terse chat summary: the `failed_layers` list (if non-empty),
 `qa_findings` filtered to `severity == "blocker"` (this schema's top severity
 tier — everything else stays out of chat and only shows in the report), and
 **one line for out-of-scope work**, e.g. `Out of scope: 3 Twirl templates, 7
-static assets left in the Play repo (not migrated)`. End with the `report.html`
-path. Everything else — clean layers, `major`/`minor` findings — is in the
-report, not the chat.
+static assets left in the Play repo (not migrated)`, and **one line for what the
+run cost**, e.g. `Run: 14m 20s wall clock, 4 dispatches, 512k tokens (~$1.40)`.
+End with the `report.html` path. Everything else — clean layers, `major`/`minor`
+findings — is in the report, not the chat.
 
 The out-of-scope line is not optional. A human who is not told which files were
 never in scope will read the report as a complete migration.
@@ -491,6 +522,21 @@ artifacts, and any finding IDs to address. Never paste file contents — the
 subagent has read access and will pull what it needs. Ask for a structured
 summary back, not a transcript.
 <!-- /generic -->
+
+**Record every dispatch as it returns.** The tool result carries that
+subagent's `duration_ms` and `subagent_tokens`; copy them straight across:
+
+```bash
+state.py add-dispatch --status-file S --json '{"role":"dev","layer":"service",
+    "mode":"transform","duration_ms":195379,"tokens":53462,"tool_uses":27}'
+```
+
+You are the only participant who ever sees those numbers — the subagent's
+context is discarded when it reports, and the transcript can tell the report
+that *some* sidechain spent 53k tokens but not which layer bought them. Write
+it down at the moment it returns or the attribution is gone. This costs one
+subprocess per dispatch and is what turns "the migration passed" into "the
+migration passed, in 12 minutes, for 340k tokens".
 
 Dev:
 

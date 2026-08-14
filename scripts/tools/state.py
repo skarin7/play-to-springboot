@@ -145,6 +145,21 @@ def merge_status(raw: dict[str, Any]) -> dict[str, Any]:
     # T5. None rather than {} so an unrun endpoint check is distinguishable from
     # one that ran and found nothing.
     out.setdefault("endpoint_verification", None)
+
+    # What the run itself cost: wall clock, and one row per subagent dispatch.
+    # A run that finished clean still has a price, and without this the report
+    # can only say that it worked -- not whether it worked cheaply enough to be
+    # worth running on a repo ten times the size. `tokens` is folded in by
+    # report.py from the session transcripts; the dispatch rows come from the
+    # manager, which is the only participant that sees a subagent's usage line.
+    rm = out.setdefault("run_metrics", {})
+    rm.setdefault("started_at", None)
+    rm.setdefault("finished_at", None)
+    rm.setdefault("duration_seconds", None)
+    rm.setdefault("session_id", None)          # for token_report --session
+    rm.setdefault("transcript_project", None)  # manager cwd, for the slug
+    rm.setdefault("dispatches", [])
+    rm.setdefault("tokens", None)
     return out
 
 
@@ -313,6 +328,16 @@ def fold_journal(status: dict[str, Any], journal: Path, layer: str | None) -> in
 
 def cmd_init(args, status_path: Path) -> int:
     status = read_status(status_path)
+    # Stamped once. A resumed run keeps its original start, so the duration in
+    # the report is wall clock for the whole migration rather than for whatever
+    # fragment of it happened after the last interruption.
+    rm = status["run_metrics"]
+    if not rm.get("started_at"):
+        rm["started_at"] = iso_now()
+    if getattr(args, "session_id", None):
+        rm["session_id"] = args.session_id
+    if getattr(args, "transcript_project", None):
+        rm["transcript_project"] = str(Path(args.transcript_project).expanduser())
     atomic_write_json(status_path, status)
     print(f"initialized {status_path}", file=sys.stderr)
     return 0
@@ -355,6 +380,54 @@ def cmd_fold_journal(args, status_path: Path) -> int:
     n = fold_journal(status, args.journal.expanduser().resolve(), args.layer)
     atomic_write_json(status_path, status)
     print(f"folded {n} journal entries", file=sys.stderr)
+    return 0
+
+
+def cmd_add_dispatch(args, status_path: Path) -> int:
+    """
+    Record one subagent dispatch: role, what it was for, and what it cost.
+
+    The manager is the only participant that ever sees a subagent's usage line
+    -- the subagent's own context is discarded when it reports, and the
+    transcript can attribute tokens to "some sidechain" but not to "the dev
+    dispatch for the controller layer". So the attribution has to be written
+    down at the moment the dispatch returns or it is gone.
+    """
+    status = read_status(status_path)
+    entry = json.loads(args.json)
+    if not entry.get("role"):
+        print("ERROR: dispatch needs at least a 'role'", file=sys.stderr)
+        return 1
+    entry.setdefault("layer", None)
+    entry.setdefault("mode", None)
+    entry.setdefault("duration_ms", None)
+    entry.setdefault("tokens", None)
+    entry.setdefault("tool_uses", None)
+    entry.setdefault("at", iso_now())
+    rows = status["run_metrics"].setdefault("dispatches", [])
+    rows.append(entry)
+    atomic_write_json(status_path, status)
+    print(len(rows))
+    return 0
+
+
+def cmd_finish(args, status_path: Path) -> int:
+    """Close the wall clock. Idempotent: re-running restamps the end."""
+    status = read_status(status_path)
+    rm = status["run_metrics"]
+    rm["finished_at"] = iso_now()
+    started = rm.get("started_at")
+    if started:
+        try:
+            t0 = datetime.strptime(started, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            t1 = datetime.strptime(rm["finished_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            rm["duration_seconds"] = int((t1 - t0).total_seconds())
+        except ValueError:
+            rm["duration_seconds"] = None
+    atomic_write_json(status_path, status)
+    json.dump({k: rm[k] for k in ("started_at", "finished_at", "duration_seconds")},
+              sys.stdout, indent=2)
+    sys.stdout.write("\n")
     return 0
 
 
@@ -439,13 +512,28 @@ def main() -> int:
             "  state.py fold-journal --status-file S \\\n"
             "      --journal .migration/journal/service-dev.ndjson --layer service\n"
             "  state.py gate --status-file S --name architecture --value approved\n"
+            "  state.py add-dispatch --status-file S --json '{\"role\":\"dev\","
+            "\"layer\":\"service\",\"duration_ms\":195379,\"tokens\":53462}'\n"
+            "  state.py finish --status-file S\n"
             "\n"
             "--value parses as JSON when it can (true, 3, [\"a\"]), else as a string.\n"
         ),
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("init", parents=[common], help="Create/normalise the status file.")
+    p_init = sub.add_parser(
+        "init", parents=[common], help="Create/normalise the status file."
+    )
+    p_init.add_argument(
+        "--session-id", default=None,
+        help="Claude Code session uuid, so report.py can scope token accounting "
+             "to this run instead of every session in the project.",
+    )
+    p_init.add_argument(
+        "--transcript-project", default=None,
+        help="Manager cwd, used to find ~/.claude/projects/<slug>/. Defaults to "
+             "report.py's own --token-project at render time.",
+    )
 
     p_show = sub.add_parser(
         "show", parents=[common], help="Print the whole file, or one dotted path."
@@ -470,6 +558,21 @@ def main() -> int:
     )
     p_fold.add_argument("--journal", type=Path, required=True)
     p_fold.add_argument("--layer", default=None)
+
+    p_disp = sub.add_parser(
+        "add-dispatch", parents=[common],
+        help="Record one subagent dispatch and its cost; prints the row count.",
+    )
+    p_disp.add_argument(
+        "--json", required=True,
+        help='Requires role. e.g. \'{"role":"dev","layer":"service",'
+             '"mode":"transform","duration_ms":195379,"tokens":53462,"tool_uses":27}\'',
+    )
+
+    sub.add_parser(
+        "finish", parents=[common],
+        help="Stamp finished_at and compute duration_seconds.",
+    )
 
     p_gate = sub.add_parser("gate", parents=[common], help="Record a human gate decision.")
     p_gate.add_argument("--name", required=True, help="e.g. architecture")
@@ -506,6 +609,8 @@ def main() -> int:
         "fold-journal": cmd_fold_journal,
         "gate": cmd_gate,
         "bump-attempt": cmd_bump_attempt,
+        "add-dispatch": cmd_add_dispatch,
+        "finish": cmd_finish,
     }
     try:
         return handlers[args.cmd](args, status_path)
