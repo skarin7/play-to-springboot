@@ -1,0 +1,14 @@
+{
+  "name": "play-to-springboot-marketplace",
+  "description": "Self-hosted marketplace for the play-to-springboot plugin, pending review in the public claude-community marketplace.",
+  "owner": {
+    "name": "Shankar Karingula"
+  },
+  "plugins": [
+    {
+      "name": "play-to-springboot",
+      "source": "./",
+      "description": "Migrate a Play Framework (Java) repo to Spring Boot using researcher/architect/dev/qa subagents coordinated through shared state, with a single upfront human gate."
+    }
+  ]
+}

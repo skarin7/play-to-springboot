@@ -5,45 +5,29 @@ contract in [STATE-CONTRACT.md](STATE-CONTRACT.md).
 
 ## Phase 0 — one-time setup
 
-```bash
-# Build the transformer, if you have the toolkit source
-cd /path/to/java-dev-toolkit && mvn -q package
-cp target/dev-toolkit-1.0.0.jar /path/to/play-to-spring-kit/lib/
+Install the `play-to-springboot` plugin (see the README), then run:
 
-# Prepare the workspace (idempotent; safe on every re-run)
-cd /path/to/play-to-spring-kit
-python3 scripts/migration_orchestrator.py setup --play-repo ../your-play-app
+```
+/play-to-springboot:migrate /path/to/your-play-app
 ```
 
-This creates `spring-<basename>/`, copies the JAR into the Play repo, installs
-`.claude/skills/`, `.claude/agents/`, and `.cursor/skills/`, writes
-`workspace.yaml`, seeds `route-map.json` from `conf/routes`, creates
-`.migration/journal/`, and puts the Spring repo on a `migration/<name>` branch.
+The first run scaffolds the workspace automatically — `spring-<basename>/`,
+`workspace.yaml`, `route-map.json` from `conf/routes`, `.migration/journal/`,
+and a `migration/<name>` branch on the Spring repo — and fetches the
+dev-toolkit jar (checksum-verified against the pin in
+`scripts/tools/toolkit-release.json`, cached under `$CLAUDE_PLUGIN_DATA` so
+later runs don't re-download it). There is no separate manual setup step and
+nothing gets copied into `<play-repo>/.claude/` — skills and agents come from
+the installed plugin itself.
 
-**Re-run setup after updating the kit.** The skills and agents installed under
-`<play-repo>/.claude/` are copies taken at setup time; they do not track later
-edits to the kit, and nothing warns you that they have drifted. Setup overwrites
-them, and re-running is safe — it preserves your own files under `.cursor/docs/`
-and any custom agents you added.
+Resuming an interrupted run is the same command: `/play-to-springboot:migrate`
+reads `migration-status.json` first and picks up from the first incomplete
+step.
 
-Check the inventory before starting:
+## Phase 1 — research and architecture
 
-```bash
-python3 scripts/migration_orchestrator.py status --play-repo ../your-play-app
-```
-
-If `toolkit_jar.status` is `stale`, the JAR in the Play repo predates the
-LayerDetector fix and will place the listed files in the wrong layer. Refresh it
-from `lib/` first. `current` needs no action.
-
-## Phase 1 — run the manager
-
-Open the **Play repo** in Claude Code:
-
-> Run the play-spring-manager skill for this workspace; resume from
-> migration-status.json if present.
-
-The manager works through: inventory → researcher → architect → **Gate 1**.
+The migrate skill works through: workspace setup → jar fetch → inventory →
+researcher → architect → **Gate 1**.
 
 ## Gate 1 — approve the approach
 
@@ -81,22 +65,28 @@ when `gate.py` sets `needs_agent`: errors landing in a layer already finished, a
 build failure the parser could not classify, or a file that would not parse.
 That removed one full agent round trip per layer.
 
-**Gate 2** fires after the `model` layer: read the three or so generated files. If
-the idiom is wrong, it is wrong in three files rather than in all of them.
+Gate 1 is the only stop in this run — once you approve the architecture, the
+layer loop runs unattended through every layer to the final report. Nothing
+pauses for a "review the first layer" or "approve the merge" step; those two
+gates existed in an earlier version of this tool and were dropped so a run
+that starts overnight can actually finish overnight.
 
-Layers after that do not stop by default. Set `gates.mode: strict` in
-`migration-status.json` to review every layer.
+## Layer failure — soft, not a halt
 
-## Gate 3 — escalation
+When a layer reaches 3 attempts on its current batch, or the gate reports a
+T2 blocker (a public method disappeared), the migrate skill writes
+`.migration/escalation-<layer>.md` — the open findings, the last three
+error-signature sets, and what dev tried — same as before. What's different:
+it does **not** stop the run. The layer is recorded in `failed_layers` and the
+loop moves on to the next layer. You read the escalation file afterward, via
+the chat summary or `report.html`, not as an interruption mid-run.
 
-The manager stops and writes `.migration/escalation-<layer>.md` when any of:
+Two things still halt the whole run outright, because they mean the tool's
+core invariant broke rather than a migration attempt failing:
 
-- a layer reaches 3 attempts
-- the gate reports a T2 blocker (a public method disappeared)
-- `git -C <play-repo> status --porcelain` is non-empty (dev touched the Play repo)
-
-The file holds the open findings, the last three error-signature sets, and what
-dev tried. Read that rather than the transcript.
+- `git -C <play-repo> status --porcelain` is non-empty (dev touched the
+  read-only Play repo)
+- dev reports it cannot proceed without changing the Play repo
 
 ## Phase 4 — endpoint parity (T5)
 
@@ -129,20 +119,31 @@ Timestamps, ids and durations are compared for presence and type, not equality;
 two runs of the same app differ there. Field ordering is never a difference.
 Everything left over is what QA rules on.
 
-## Gate 4 — merge
+## Final gate and report
 
 `gate.py --final` (full-tree T1–T4) plus `verify.py` for completeness and route
 parity, plus the T5 result. Counts do not need to match exactly: files in
 `no_migration` are subtracted from the baseline, and extra Spring files (config,
 error handlers) are expected.
 
+This doesn't wait for approval — it's not a gate, just the last step. The
+migrate skill renders `.migration/report.html` (`scripts/tools/report.py`) and
+prints a chat summary: `failed_layers`, and `qa_findings` at `blocker`
+severity only. Everything else — clean layers, `major`/`minor` findings — is
+in the report, not the chat. Re-open or regenerate it any time with
+`/play-to-springboot:report /path/to/your-play-app`, which doesn't touch
+migration state.
+
 ## Resuming
 
-Re-run the same manager invocation. Completed layers are skipped, the transformer
-skips files already present in the target, and a dev subagent killed mid-layer is
-picked up from its journal.
+Re-run `/play-to-springboot:migrate /path/to/your-play-app`. Completed layers
+are skipped, the transformer skips files already present in the target, and a
+dev subagent killed mid-layer is picked up from its journal.
 
 ## Checking on it yourself
+
+Run these from the plugin's own directory (`$CLAUDE_PLUGIN_ROOT`, or wherever
+you installed/cloned it):
 
 ```bash
 # counts, gate status, open findings
@@ -151,15 +152,23 @@ python3 scripts/migration_orchestrator.py status --play-repo ../your-play-app
 # completeness and route parity
 python3 scripts/migration_orchestrator.py verify --play-repo ../your-play-app
 
-# the whole gate for one layer — same command the manager runs
+# fetch/locate the checksum-verified dev-toolkit jar
+JAR=$(python3 scripts/tools/fetch_jar.py)
+
+# the whole gate for one layer — same command the migrate skill runs
 python3 scripts/tools/gate.py --play-repo ../your-play-app \
-    --spring-repo ../spring-your-play-app --layer service
+    --spring-repo ../spring-your-play-app --layer service --jar "$JAR"
 
 # structural preservation on its own
-java -jar dev-toolkit-1.0.0.jar signature <play>/app             > /tmp/p.json
-java -jar dev-toolkit-1.0.0.jar signature <spring>/src/main/java > /tmp/s.json
+java -jar "$JAR" signature <play>/app             > /tmp/p.json
+java -jar "$JAR" signature <spring>/src/main/java > /tmp/s.json
 python3 scripts/tools/signature_diff.py --play /tmp/p.json --spring /tmp/s.json \
     --layer service --layer-only
+
+# regenerate the report without re-running anything
+python3 scripts/tools/report.py \
+    --status-file ../spring-your-play-app/migration-status.json \
+    --out ../spring-your-play-app/.migration/report.html
 ```
 
 Raw Maven output from the gate lands in `<spring-repo>/.migration/logs/`; the

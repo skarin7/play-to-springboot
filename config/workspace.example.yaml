@@ -7,5 +7,3 @@ spring_repo: /path/to/spring-<basename>
 migration_root: /path/to/workspace-dir
 batch_size: 25
 base_package: com.example.application
-# Set by scripts/setup.sh: absolute path to <play_repo>/.cursor (config/, docs/, skills/)
-# kit_path: /path/to/<play-repo>/.cursor

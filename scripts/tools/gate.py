@@ -2,8 +2,12 @@
 """
 Run the verification tiers for a layer and return one verdict.
 
-    python3 scripts/tools/gate.py --play-repo P --spring-repo S --layer service
-    python3 scripts/tools/gate.py --play-repo P --spring-repo S --final
+    python3 scripts/tools/gate.py --play-repo P --spring-repo S --layer service --jar J
+    python3 scripts/tools/gate.py --play-repo P --spring-repo S --final --jar J
+
+``--jar`` is the path ``scripts/tools/fetch_jar.py`` printed for this run --
+a checksum-verified, version-pinned jar. There is no fallback path resolution
+here; a caller that hasn't fetched the jar is an error, not a guess.
 
 This is the manager's own check, not an agent's. Every tier below is
 deterministic -- a subprocess call and a comparison -- so wrapping them in an
@@ -330,7 +334,10 @@ def main() -> int:
         action="store_true",
         help="Final pass: full-tree T2, plus T3 and T4.",
     )
-    parser.add_argument("--jar", type=Path, default=None)
+    parser.add_argument(
+        "--jar", type=Path, required=True,
+        help="Path to the dev-toolkit jar, as printed by scripts/tools/fetch_jar.py.",
+    )
     parser.add_argument("--status-file", type=Path, default=None)
     parser.add_argument(
         "--layer-overrides",
@@ -363,11 +370,7 @@ def main() -> int:
     for d in (log_dir, cache_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    jar = args.jar or (play_repo / "dev-toolkit-1.0.0.jar")
-    if not jar.is_file():
-        fallback = Path(__file__).resolve().parents[2] / "lib" / "dev-toolkit-1.0.0.jar"
-        if fallback.is_file():
-            jar = fallback
+    jar = args.jar.expanduser().resolve()
 
     no_migration: set[str] = set()
     done_layers: set[str] = set()

@@ -46,6 +46,8 @@ def default_layer_entry() -> dict[str, Any]:
         "validate_iteration": 0,
         "last_error_count": None,
         "failure_reason": None,
+        "remaining_files": None,
+        "batches_completed": 0,
     }
 
 
@@ -188,6 +190,8 @@ def fold_journal(status: dict[str, Any], journal: Path, layer: str | None) -> in
             le["files_migrated"] = int(le.get("files_migrated", 0)) + int(
                 entry.get("count", 1)
             )
+            if "remaining" in entry:
+                le["remaining_files"] = entry.get("remaining")
         elif action == "failed":
             failed = le.setdefault("files_failed", [])
             f = entry.get("file")

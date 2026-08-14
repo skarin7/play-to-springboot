@@ -78,10 +78,16 @@ is skipped; the completed lines before it are still good.
 Journal lines:
 
 ```json
-{"layer":"service","action":"migrated","count":3}
+{"layer":"service","action":"migrated","count":3,"remaining":85}
 {"layer":"service","action":"failed","file":"ContentService.java"}
 {"layer":"service","action":"compiled","error_count":7}
 ```
+
+`remaining` on a `"migrated"` line is the dev-toolkit's own `R` from
+`migrate-app --batch-size N`, folded into `layers.<layer>.remaining_files`.
+Dev runs exactly one `--batch-size` pass per dispatch — the manager, not dev,
+decides whether `remaining_files > 0` warrants another dispatch for the same
+layer. See "Batching a layer" below.
 
 ## Context handoff
 
@@ -137,7 +143,9 @@ keeps all its fields and gains the new ones. Legacy keys (`autonomous`,
 
   "layers": {
     "<layer>": { "status", "files_migrated", "files_failed",
-                 "validate_iteration", "last_error_count", "failure_reason" }
+                 "validate_iteration", "last_error_count", "failure_reason",
+                 "remaining_files",   // R from the last batch's migrate-app run; null until started
+                 "batches_completed" }
   },
 
   "qa_findings": [ { "id": "F-001", "layer", "file", "tier": "T1|T2|T3|T4|T5",
@@ -150,11 +158,12 @@ keeps all its fields and gains the new ones. Legacy keys (`autonomous`,
 
   "attempts": { "<layer>": { "count", "error_signatures": [], "last_findings": [] } },
 
-  "gates": { "mode": "milestone | strict",
+  "gates": { "mode": "milestone | strict",  // legacy; unread now that only the
+                                             // architecture gate blocks — see "Gates" below
              "architecture": { "human": "approved", "at": "..." },
              "layer.<name>": { "human": "pending | approved", "at": "..." } },
 
-  "commits": { "<layer>": "<sha>" },
+  "commits": { "<layer>": [ { "batch": 1, "sha": "<sha>" } ] },
 
   "migration_verification": { "status", "checked_at", "play_java_total",
                               "spring_java_total", "excluded_from_baseline",
@@ -205,23 +214,56 @@ skips it because the output already exists.
 | Gate | When | Blocking |
 |---|---|---|
 | 1 — Architecture | after architect, before any code | yes |
-| 2 — First layer | after `model` passes QA | yes (merges into 4 in `collapsed` mode) |
-| 3 — Escalation | conditional, below | yes |
-| 4 — Merge | after final QA | yes |
 
-`gates.mode: milestone` (default) stops at the table above. `strict` stops after
-every layer. On a 15-file project strict means six stops for about two files
-each, which is why it is not the default.
+Exactly one gate blocks a run. The earlier design also stopped after the
+first layer and again before merge; both were dropped so that, once the
+architecture is approved, the whole pipeline runs unattended through to the
+final report — the trade being that a human reviews the outcome afterward via
+the chat summary and `report.html` instead of being asked to approve
+mid-run.
 
-**Gate 3 triggers** on any of:
+**The escalation trigger** — a layer's per-batch retry budget exhausted —
+still fires on any of:
 
 - `attempts.<layer>.count` reaching 3
 - any T2 `blocker` (`method-missing`)
-- `git -C <play-repo> status --porcelain` non-empty
 
-On trigger the manager writes `.migration/escalation-<layer>.md` — open findings,
-the last three error-signature sets, what dev tried each time — and stops. One
-file to read, not a transcript.
+`attempts.<layer>.count` is scoped to the layer's **current batch**, not the
+whole layer — it resets to 0 every time a batch's gate passes. See "Batching a
+layer" below.
+
+On trigger the manager writes `.migration/escalation-<layer>.md` — the batch
+index and file range, open findings, the last three error-signature sets, what
+dev tried each time — same as before. What changed: it no longer stops the
+run. The layer is recorded in `failed_layers` and the manager moves on to the
+next layer in dependency order. `report.html` and the end-of-run chat summary
+are where a human reads the escalation note back, not something they respond
+to in the moment.
+
+Two conditions are **not** softened this way, because they are integrity
+violations rather than a layer running out of retries, and still halt the
+whole run:
+
+- `git -C <play-repo> status --porcelain` non-empty (dev touched read-only
+  Play source)
+- dev reporting it cannot proceed without changing the Play repo
+
+### Batching a layer
+
+Layer sizes are badly skewed in a real Play app — `model` might be 5 files,
+`service` 100+. Treating a whole layer as one dev↔gate↔commit unit loses
+fail-fast and blast-radius control exactly where it matters most: on the big
+layers. So the per-layer loop is actually a per-**batch** loop
+(`batch_size` from `workspace.yaml`): dev runs one `migrate-app --batch-size
+N` pass per dispatch, the manager gates and commits that batch alone, and
+loops back for the next batch while `layers.<layer>.remaining_files > 0`. A
+layer whose file count is ≤ `batch_size` still finishes in a single batch —
+this is not a special case, just the loop terminating after one iteration.
+
+Because `signature_diff.py`'s T2 tier treats a Play class with no Spring
+counterpart yet as `classes_absent_from_spring` (not a finding), gating a
+layer that is only partially migrated is safe by construction — later
+batches' files simply haven't landed yet and are not reported as missing.
 
 ### Stuck loop vs progress
 
@@ -235,15 +277,10 @@ real downstream errors was indistinguishable from thrashing.
 
 ## Enforcement, and its limits
 
-Role boundaries are enforced by subagent tool grants in `.claude/agents/`: dev
-gets `Edit`/`Write`, the others do not.
+Role boundaries are enforced by subagent tool grants in this plugin's
+`agents/` directory: dev gets `Edit`/`Write`, the others do not.
 
-Two honest gaps:
-
-1. **Bash can write.** Researcher and QA need Bash to run `mvn` and the helper
-   scripts, so the boundary is "does not write application source", not "cannot
-   write at all". The `git status` guard on the Play repo is the real backstop.
-2. **Cursor has no subagent isolation.** On that path the roles are advisory
-   prose and one agent plays all of them, marking its own homework. The
-   `git status` guard and script-owned verification are **mandatory** there, not
-   belt-and-braces. Claude Code is where the model actually holds.
+One honest gap: **Bash can write.** Researcher and QA need Bash to run `mvn`
+and the helper scripts, so the boundary is "does not write application
+source", not "cannot write at all". The `git status` guard on the Play repo is
+the real backstop.

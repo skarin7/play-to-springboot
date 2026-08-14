@@ -3,16 +3,18 @@
 Workspace bootstrap and deterministic status reporting for a Play -> Spring migration.
 
 This script no longer orchestrates. Sequencing, model selection, retry policy,
-and failure handling now live in the ``play-spring-manager`` skill and are
-carried out by the coding agent; what remains here is the deterministic work that
-agents do badly and scripts do exactly: preparing the workspace and reporting
-counts.
+and failure handling now live in the ``migrate`` skill
+(``skills/migrate/SKILL.md``) and are carried out by the coding agent; what
+remains here is the deterministic work that agents do badly and scripts do
+exactly: preparing the workspace and reporting counts. The ``migrate`` skill
+calls ``setup`` itself on first run -- this is exposed for manual/scripted use
+and debugging.
 
     python3 scripts/migration_orchestrator.py setup  --play-repo ../my-play-app
     python3 scripts/migration_orchestrator.py status --play-repo ../my-play-app
     python3 scripts/migration_orchestrator.py verify --play-repo ../my-play-app
 
-Then open the Play repo in Claude Code and invoke ``play-spring-manager``.
+Then run ``/play-to-springboot:migrate ../my-play-app`` in Claude Code.
 
 Previously this file drove the whole migration itself: it picked a Cursor model
 through a four-level precedence chain, capped LLM calls, retried layers, guessed
@@ -112,7 +114,7 @@ def cmd_status(args) -> int:
     status_path = spring_repo / "migration-status.json"
     if not status_path.is_file():
         print(f"\nNo status file yet at {status_path}."
-              f"\nThe play-spring-manager skill creates it on first run.",
+              f"\nThe migrate skill creates it on first run.",
               file=sys.stderr)
         return rc
 
@@ -145,7 +147,7 @@ def cmd_verify(args) -> int:
     if status_path.is_file():
         status = read_status(status_path)
         if status["initialize"].get("status") != "done":
-            print("Initialize is not done; run the play-spring-manager skill first.",
+            print("Initialize is not done; run /play-to-springboot:migrate first.",
                   file=sys.stderr)
             return 3
 
@@ -162,7 +164,7 @@ def main() -> int:
         description=__doc__.strip().split("\n")[0],
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Orchestration lives in the play-spring-manager skill, not here.\n"
+            "Orchestration lives in the migrate skill, not here.\n"
             "Run this for workspace setup and for deterministic counts.\n"
         ),
     )

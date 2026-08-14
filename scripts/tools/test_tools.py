@@ -11,23 +11,27 @@ verification silently reports success on a broken migration.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import endpoint_diff  # noqa: E402
+import fetch_jar  # noqa: E402
 import gate  # noqa: E402
 import parse_mvn  # noqa: E402
+import report  # noqa: E402
 import routes as routes_mod  # noqa: E402
 import signature_diff  # noqa: E402
 import state  # noqa: E402
 import verify  # noqa: E402
-from layers import (classify, classify_legacy, divergences,  # noqa: E402
-                    jar_has_layer_fix)
+from layers import classify, classify_legacy, divergences  # noqa: E402
 
 
 class TestClassify(unittest.TestCase):
@@ -124,50 +128,6 @@ class TestLegacyDivergence(unittest.TestCase):
         )
         for d in found:
             self.assertEqual(d.jar_actual, "other")
-
-
-class TestJarVersionCheck(unittest.TestCase):
-    """
-    The check must inspect the JAR, not the project layout.
-
-    An earlier version asked "would a pre-fix JAR misclassify these paths?",
-    which is a property of the layout - so it fired on every flat-layout project
-    forever, including correctly configured ones.
-    """
-
-    def _jar(self, path: Path, entries: list[str]) -> Path:
-        import zipfile
-        with zipfile.ZipFile(path, "w") as z:
-            for e in entries:
-                z.writestr(e, "")
-        return path
-
-    def test_jar_with_marker_is_current(self):
-        with tempfile.TemporaryDirectory() as d:
-            jar = self._jar(
-                Path(d) / "dev-toolkit-1.0.0.jar",
-                ["com/phenom/devtoolkit/LayerDetector.class",
-                 "com/phenom/devtoolkit/SignatureExtractor.class"],
-            )
-            self.assertIs(jar_has_layer_fix(jar), True)
-
-    def test_jar_without_marker_is_stale(self):
-        with tempfile.TemporaryDirectory() as d:
-            jar = self._jar(
-                Path(d) / "dev-toolkit-1.0.0.jar",
-                ["com/phenom/devtoolkit/LayerDetector.class"],
-            )
-            self.assertIs(jar_has_layer_fix(jar), False)
-
-    def test_missing_jar_is_unknown_not_stale(self):
-        # Absent must not read as broken; the caller reports "not_found".
-        self.assertIsNone(jar_has_layer_fix(Path("/nonexistent/dev-toolkit-1.0.0.jar")))
-
-    def test_non_zip_is_unknown(self):
-        with tempfile.TemporaryDirectory() as d:
-            junk = Path(d) / "dev-toolkit-1.0.0.jar"
-            junk.write_text("not a jar", encoding="utf-8")
-            self.assertIsNone(jar_has_layer_fix(junk))
 
 
 class TestParseMvn(unittest.TestCase):
@@ -974,6 +934,173 @@ class TestEndpointDiff(unittest.TestCase):
         )
         self.assertEqual(result["findings"][0]["category"], "content-type-changed")
         self.assertEqual(result["status"], "needs_review")
+
+
+class TestFetchJar(unittest.TestCase):
+    """
+    The jar this prints has to be exactly the pinned bytes, or the caller has
+    to see a loud failure -- never a silently wrong or missing jar.
+    """
+
+    def _release_file(self, tmp: Path, download_url: str, sha256: str,
+                       version: str = "9.9.9") -> Path:
+        release = tmp / "toolkit-release.json"
+        release.write_text(json.dumps({
+            "version": version, "download_url": download_url, "sha256": sha256,
+        }), encoding="utf-8")
+        return release
+
+    def test_cache_hit_skips_download(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            cache_dir = tmp / "cache"
+            cache_dir.mkdir()
+            content = b"fake jar bytes"
+            digest = hashlib.sha256(content).hexdigest()
+            (cache_dir / "dev-toolkit-9.9.9.jar").write_bytes(content)
+            # A download_url that would fail if fetch_jar ever tried to use it --
+            # proves the cache-hit path never calls download().
+            release = self._release_file(tmp, "http://127.0.0.1:1/unreachable", digest)
+            jar_path = fetch_jar.fetch(release, cache_dir)
+            self.assertEqual(jar_path, cache_dir / "dev-toolkit-9.9.9.jar")
+
+    def test_download_and_verify_success(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            cache_dir = tmp / "cache"
+            source = tmp / "source.jar"
+            content = b"a real-enough jar for this test"
+            source.write_bytes(content)
+            digest = hashlib.sha256(content).hexdigest()
+            release = self._release_file(tmp, source.resolve().as_uri(), digest)
+            jar_path = fetch_jar.fetch(release, cache_dir)
+            self.assertEqual(jar_path.read_bytes(), content)
+
+    def test_checksum_mismatch_fails_loudly_and_does_not_leave_the_bad_jar(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            cache_dir = tmp / "cache"
+            source = tmp / "source.jar"
+            source.write_bytes(b"whatever bytes")
+            wrong_sha = "0" * 64
+            release = self._release_file(tmp, source.resolve().as_uri(), wrong_sha)
+            with self.assertRaises(SystemExit):
+                fetch_jar.fetch(release, cache_dir)
+            self.assertFalse((cache_dir / "dev-toolkit-9.9.9.jar").exists())
+
+    def test_stale_cached_jar_is_redownloaded(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            cache_dir = tmp / "cache"
+            cache_dir.mkdir()
+            (cache_dir / "dev-toolkit-9.9.9.jar").write_bytes(b"old wrong content")
+            source = tmp / "source.jar"
+            new_content = b"the correct new content"
+            source.write_bytes(new_content)
+            digest = hashlib.sha256(new_content).hexdigest()
+            release = self._release_file(tmp, source.resolve().as_uri(), digest)
+            jar_path = fetch_jar.fetch(release, cache_dir)
+            self.assertEqual(jar_path.read_bytes(), new_content)
+
+    def test_missing_release_file_fails_loudly(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            with self.assertRaises(SystemExit):
+                fetch_jar.fetch(tmp / "nonexistent.json", tmp / "cache")
+
+    def test_release_file_missing_fields_fails_loudly(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            release = tmp / "toolkit-release.json"
+            release.write_text(json.dumps({"version": "1.0.0"}), encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                fetch_jar.fetch(release, tmp / "cache")
+
+
+class TestReport(unittest.TestCase):
+    """The report is a pure function of migration-status.json -- no network, no git required."""
+
+    def _status(self, **overrides: Any) -> dict[str, Any]:
+        base = {
+            "current_step": "verify",
+            "layers": {
+                "model": {"status": "done", "files_migrated": 3, "files_failed": [],
+                          "batches_completed": 1, "remaining_files": 0},
+                "service": {"status": "failed", "files_migrated": 5,
+                           "files_failed": ["X.java"], "batches_completed": 2,
+                           "remaining_files": 3, "last_error_count": 4,
+                           "failure_reason": "attempts exhausted"},
+            },
+            "failed_layers": ["service"],
+            "qa_findings": [
+                {"id": "F-001", "layer": "controller", "file": "GET /v1/content",
+                 "tier": "T5", "severity": "blocker", "category": "field-missing",
+                 "evidence": "fields absent: a, b", "suggested_fix": "check model",
+                 "status": "open"},
+                {"id": "F-002", "layer": "model", "file": "User.java", "tier": "T2",
+                 "severity": "minor", "category": "drop", "evidence": "1 statement dropped",
+                 "suggested_fix": "n/a", "status": "accepted"},
+            ],
+            "endpoint_verification": {"status": "completed",
+                                      "checked_at": "2026-08-14T00:00:00Z",
+                                      "probes_compared": 5, "not_captured_after": []},
+            "commits": {"model": [{"batch": 1, "sha": "deadbeefdeadbeefdead"}]},
+        }
+        base.update(overrides)
+        return base
+
+    def test_report_includes_layers_and_marks_failed(self):
+        out = report.render_report(self._status(), None, "2026-08-14T00:00:00Z")
+        self.assertIn("model", out)
+        self.assertIn("service", out)
+        self.assertIn("failed-row", out)  # service is in failed_layers
+
+    def test_report_includes_findings_sorted_by_severity(self):
+        out = report.render_report(self._status(), None, "2026-08-14T00:00:00Z")
+        self.assertIn("F-001", out)
+        self.assertIn("F-002", out)
+        self.assertLess(out.index("F-001"), out.index("F-002"))  # blocker before minor
+
+    def test_report_handles_no_findings(self):
+        out = report.render_report(self._status(qa_findings=[]), None, "2026-08-14T00:00:00Z")
+        self.assertIn("No QA findings", out)
+
+    def test_report_handles_missing_endpoint_verification(self):
+        out = report.render_report(
+            self._status(endpoint_verification=None), None, "2026-08-14T00:00:00Z"
+        )
+        self.assertIn("has not run yet", out)
+
+    def test_report_escapes_html_in_evidence(self):
+        status = self._status()
+        status["qa_findings"][0]["evidence"] = "<script>alert(1)</script>"
+        out = report.render_report(status, None, "2026-08-14T00:00:00Z")
+        self.assertNotIn("<script>alert(1)</script>", out)
+        self.assertIn("&lt;script&gt;", out)
+
+    def test_main_writes_file_and_prints_path(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            status_file = tmp / "migration-status.json"
+            status_file.write_text(json.dumps(self._status()), encoding="utf-8")
+            out_path = tmp / ".migration" / "report.html"
+            proc = subprocess.run(
+                [sys.executable, str(Path(__file__).resolve().parent / "report.py"),
+                 "--status-file", str(status_file), "--out", str(out_path)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertTrue(out_path.is_file())
+
+    def test_main_fails_loudly_on_missing_status_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            proc = subprocess.run(
+                [sys.executable, str(Path(__file__).resolve().parent / "report.py"),
+                 "--status-file", str(tmp / "nope.json"), "--out", str(tmp / "out.html")],
+                capture_output=True, text=True,
+            )
+            self.assertNotEqual(proc.returncode, 0)
 
 
 if __name__ == "__main__":

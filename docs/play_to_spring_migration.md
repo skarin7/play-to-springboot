@@ -14,7 +14,7 @@ role contract and state schema, see [STATE-CONTRACT.md](STATE-CONTRACT.md).
 
 | Principle | What it means |
 |---|---|
-| **Deterministic CLI first** | `dev-toolkit-1.0.0.jar` handles the mechanical bulk — paths, layers, AST rewrites. |
+| **Deterministic CLI first** | the dev-toolkit jar (fetched, checksum-verified, and version-pinned by `scripts/tools/fetch_jar.py`) handles the mechanical bulk — paths, layers, AST rewrites. |
 | **Agents for judgment** | Dependency mapping, config mapping, compile fixes, edge cases. |
 | **Scripts for anything countable** | Inventory, verification, signature diffs, error parsing. Agents count inconsistently; scripts are exact and free. |
 | **Explicit state** | `migration-status.json`, written only by the manager. Runs resume. |
@@ -28,18 +28,19 @@ role contract and state schema, see [STATE-CONTRACT.md](STATE-CONTRACT.md).
 ```
 workspace/
 ├── <play-repo>/              ← READ-ONLY during migration
-│   ├── dev-toolkit-1.0.0.jar
-│   ├── app/  conf/  build.sbt
-│   ├── .claude/{skills,agents}/
-│   └── .cursor/{skills,config,docs}/
+│   └── app/  conf/  build.sbt
 ├── spring-<basename>/
 │   ├── migration-status.json
-│   ├── .migration/           ← research.md, decisions.md, findings, journals
+│   ├── .migration/           ← research.md, decisions.md, findings, journals, report.html
 │   ├── pom.xml
 │   └── src/main/java/
 ├── workspace.yaml
 └── route-map.json
 ```
+
+Nothing is copied into `<play-repo>/.claude/` — skills and agents come from
+the installed `play-to-springboot` plugin. The dev-toolkit jar lives in
+`$CLAUDE_PLUGIN_DATA` (fetched once, cached across runs), not in either repo.
 
 ---
 
@@ -67,9 +68,12 @@ Matching is on whole segments. An earlier version substring-matched
 `/controllers/` against a path already relative to `app/`, so Play's default
 scaffold layout (`app/controllers/HomeController.java`, `package controllers;`)
 never matched and every controller migrated as `other` with no `@RestController`.
-If `inventory.py` reports `toolkit_jar.status: stale`, the JAR in your Play repo
-still has that behavior — refresh it from `lib/`. The check inspects the JAR
-rather than the layout, so it stays silent once the JAR is current.
+That behavior can't reappear from a stray copy of the jar any more —
+`fetch_jar.py` only ever hands out the version pinned in
+`scripts/tools/toolkit-release.json`, checksum-verified on every fetch — but
+`scripts/tools/layers.py` still ships `classify_legacy()` and `divergences()`
+as a regression guard against the substring-matching bug coming back in a
+future toolkit build.
 
 ### Migration order
 
@@ -84,17 +88,22 @@ rather than the layout, so it stays silent once the JAR is current.
 
 ---
 
-## 4. `dev-toolkit-1.0.0.jar` — CLI contract
+## 4. dev-toolkit jar — CLI contract
 
-Single shaded JAR built from **java-dev-toolkit**. `setup.sh` copies it from the
-kit's `lib/` to `<play-repo>/dev-toolkit-1.0.0.jar`.
+Single shaded JAR built from **java-dev-toolkit**, published as a GitHub
+Release per version tag from that repo's own CI. This plugin never bundles the
+binary; `scripts/tools/fetch_jar.py` downloads it on first use per the pin in
+`scripts/tools/toolkit-release.json` `{version, download_url, sha256}`,
+verifies the checksum, and caches it under `$CLAUDE_PLUGIN_DATA` — every later
+call reuses that cached, verified path. The examples below use `$JAR` for
+that path.
 
 ### Bulk migration
 
 ```bash
-cd <play-repo>
-java -jar dev-toolkit-1.0.0.jar migrate-app \
-  [--source .] [--target ../spring-<basename>] \
+JAR=$(python3 scripts/tools/fetch_jar.py)
+java -jar "$JAR" migrate-app \
+  --source <play-repo> [--target ../spring-<basename>] \
   [--layer model|repository|manager|service|controller|other] [--batch-size N]
 ```
 
@@ -105,13 +114,13 @@ all processed; exit 1 means some files failed — compile anyway, then handle th
 ### Single file
 
 ```bash
-java -jar dev-toolkit-1.0.0.jar transform --input <play-file> --output <spring-file> [--layer ...]
+java -jar "$JAR" transform --input <play-file> --output <spring-file> [--layer ...]
 ```
 
 ### Structural signatures (T2 input)
 
 ```bash
-java -jar dev-toolkit-1.0.0.jar signature <file-or-directory> [-o out.json]
+java -jar "$JAR" signature <file-or-directory> [-o out.json]
 ```
 
 Emits per class: public method names, arity, visibility, coarse return kind, and

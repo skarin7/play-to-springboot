@@ -1,7 +1,7 @@
 # Scripts
 
 Deterministic tooling. Sequencing and failure handling live in the
-`play-spring-manager` skill, not here.
+`migrate` skill (`skills/migrate/SKILL.md`), not here.
 
 The split is deliberate: agents count files inconsistently and re-derive regexes
 badly, while scripts are exact and cost nothing to run. Judgment goes to the
@@ -39,15 +39,18 @@ anything.
 
 ## `setup.sh`
 
-Called by `migration_orchestrator.py setup`; usable directly.
+Called by `migration_orchestrator.py setup`; usable directly. Workspace
+scaffolding only — Spring repo skeleton, `workspace.yaml`, `.migration/`,
+route map, endpoint probes, git init. It does not install anything into
+`<play-repo>/.claude/`: skills and agents come from the installed
+`play-to-springboot` plugin, never from a per-repo copy.
 
 ```bash
 ./scripts/setup.sh <path-to-play-repo> [--workspace <dir>] [--spring-name <name>]
 ```
 
-Idempotent, and non-destructive: it copies over the kit reference rather than
-deleting it, so notes you add under `<play-repo>/.cursor/docs/` and custom agents
-under `.claude/agents/` survive re-runs.
+Idempotent: re-running preserves `.migration/journal/`, the endpoint probe
+list (QA's hand-filled `path_params` survive), and an existing git branch.
 
 ## `tools/` — helpers the agents call
 
@@ -57,17 +60,19 @@ Each prints JSON to stdout and does one thing.
 |---|---|
 | `gate.py` | **T1–T4 in one call**; one verdict, findings, and `needs_agent` |
 | `endpoint_diff.py` | **T5** endpoint response parity: probes, capture, diff |
-| `layers.py` | Layer classification; also detects a stale dev-toolkit JAR |
+| `layers.py` | Layer classification; `classify_legacy`/`divergences` are a regression guard, not a live jar check |
 | `inventory.py` | Per-layer counts for both trees; picks `collapsed`/`full` role mode |
 | `parse_mvn.py` | Maven log → structured errors, grouped by file, with signatures |
 | `signature_diff.py` | **T2** structural preservation |
 | `routes.py` | Play routes and Spring mappings; path normalization |
 | `verify.py` | Completeness plus **T3** route parity |
 | `state.py` | Atomic single-writer access to `migration-status.json` |
+| `fetch_jar.py` | Downloads, checksum-verifies, and caches the dev-toolkit jar |
+| `report.py` | Renders the self-contained `report.html` from `migration-status.json` |
 | `token_report.py` | Measured token/cost accounting from Claude Code transcripts |
 
 ```bash
-python3 scripts/tools/test_tools.py     # 87 tests, stdlib only
+python3 scripts/tools/test_tools.py     # 96 tests, stdlib only
 ```
 
 ### `gate.py`
@@ -77,11 +82,15 @@ agent. All four tiers are deterministic, so an agent added a round trip per laye
 and returned the same findings the scripts produced.
 
 ```bash
-gate.py --play-repo P --spring-repo S --layer service     # T1 + T2 (layer-scoped)
-gate.py --play-repo P --spring-repo S --layer controller  # adds T3
-gate.py --play-repo P --spring-repo S --final             # full-tree T2, plus T3 and T4
-gate.py --play-repo P --spring-repo S --layer init --tiers T1   # empty-project dependency check
+JAR=$(python3 scripts/tools/fetch_jar.py)   # checksum-verified, cached
+gate.py --play-repo P --spring-repo S --layer service --jar "$JAR"     # T1 + T2 (layer-scoped)
+gate.py --play-repo P --spring-repo S --layer controller --jar "$JAR"  # adds T3
+gate.py --play-repo P --spring-repo S --final --jar "$JAR"             # full-tree T2, plus T3 and T4
+gate.py --play-repo P --spring-repo S --layer init --tiers T1 --jar "$JAR"   # empty-project dependency check
 ```
+
+`--jar` is required — there's no fallback path resolution, since the caller
+is always expected to have called `fetch_jar.py` first.
 
 Raw Maven output goes to `<spring-repo>/.migration/logs/`; stdout carries only
 the parsed verdict, which is what lets the manager own the check without

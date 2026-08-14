@@ -14,7 +14,9 @@ schema and gate rules see [STATE-CONTRACT.md](STATE-CONTRACT.md).
 
 ```mermaid
 flowchart TD
-    START([setup.sh]) --> INV["inventory.py<br/>counts, mode, JAR version check"]
+    START(["/play-to-springboot:migrate &lt;path&gt;"]) --> SETUP["workspace scaffolding<br/>(spring repo, workspace.yaml — once)"]
+    SETUP --> JAR["fetch_jar.py<br/>checksum-verified, cached — once per run"]
+    JAR --> INV["inventory.py<br/>counts, mode"]
     INV --> RES[researcher<br/>reads Play repo]
     RES --> ARCH[architect<br/>decides mapping]
     ARCH --> G1{{"GATE 1 — human<br/>approve the approach"}}
@@ -26,27 +28,28 @@ flowchart TD
     EMPTY -->|dependency error| ARCH
     EMPTY -->|clean| LOOP
 
-    LOOP[["per-layer loop<br/>model → repository → manager<br/>→ service → controller → other"]]
-    LOOP --> G2{{"GATE 2 — human<br/>after the first layer"}}
-    G2 -->|reject| RESET["git reset to last passing layer"]
-    RESET --> ARCH
-    G2 -->|approved| MORE{more layers?}
+    LOOP[["per-layer loop<br/>model → repository → manager<br/>→ service → controller → other<br/>(a layer that exhausts retries<br/>joins failed_layers and the<br/>loop moves to the next one)"]]
+    LOOP --> MORE{more layers?}
     MORE -->|yes| LOOP
     MORE -->|no| FINAL["gate.py --final: T1–T4 full tree<br/>verify.py completeness"]
 
     FINAL --> T5["QA agent: T5 endpoint parity<br/>boot Play, capture, boot Spring, capture, diff"]
-    T5 --> G4{{"GATE 4 — human<br/>approve the merge"}}
-    G4 -->|approved| DONE([done])
-    G4 -->|reject| LOOP
+    T5 --> REPORT["report.py → report.html<br/>+ chat summary: failed_layers, blocker findings"]
+    REPORT --> DONE([done — unattended from here after Gate 1])
 
     style G1 fill:#fff3cd,stroke:#b8860b,color:#000
-    style G2 fill:#fff3cd,stroke:#b8860b,color:#000
-    style G4 fill:#fff3cd,stroke:#b8860b,color:#000
     style EMPTY fill:#d1ecf1,stroke:#0c5460,color:#000
     style T5 fill:#fde7e9,stroke:#c62828,color:#000
+    style REPORT fill:#d1ecf1,stroke:#0c5460,color:#000
 ```
 
 [PNG](flow-1-end-to-end.png)
+
+Gate 1 is the only stop in the run. Two earlier gates — after the first layer,
+and again before merge — were dropped: once the architecture is approved, the
+whole pipeline runs unattended through to the report, and a human reviews the
+outcome afterward via the chat summary and `report.html` rather than being
+asked to approve mid-run.
 
 The empty-project compile is worth its own box. Zero sources, but it fails a bad
 dependency map in a minute instead of surfacing as strange compile errors four
@@ -65,25 +68,34 @@ This is the self-correcting part. Dev writes **and compiles**; the manager runs
 the scripted gate; findings with evidence go back to dev. QA is dispatched only
 when the gate cannot rule on its own result.
 
+The loop runs once per **batch**, not once per layer — a skewed layer (say
+100 files in `service` against 5 in `model`) gets gated and committed in
+`batch_size`-sized slices instead of as one giant pass, so a layer's size
+never changes how quickly a problem surfaces or how much work a rejected gate
+throws away.
+
 ```mermaid
 flowchart TD
     subgraph MGR["manager — owns state, never reads source"]
-        DISPATCH["dispatch dev<br/>layer + paths + finding IDs"]
-        FOLD["fold journal into state"]
+        DISPATCH["dispatch dev<br/>layer + batch N + paths + finding IDs"]
+        FOLD["fold journal into state<br/>(incl. remaining_files)"]
         GUARD{"git status<br/>on Play repo<br/>empty?"}
         GATE["gate.py --layer X<br/>T1 compile · T2 signatures<br/>T3 routes (controller only)"]
         NEED{"needs_agent ?"}
         RECORD["state.py add-finding"]
-        COUNT{"attempts<br/>&lt; 3 ?"}
-        COMMIT["commit layer<br/>state.py set status=done"]
-        ESC["write escalation-LAYER.md<br/>STOP"]
+        COUNT{"batch attempts<br/>&lt; 3 ?"}
+        COMMIT["commit batch<br/>reset attempts, batches_completed += 1"]
+        MORE{"remaining_files<br/>&gt; 0 ?"}
+        DONE["state.py set layer status=done"]
+        ESC["write escalation-LAYER.md<br/>(batch + file range)<br/>failed_layers += layer<br/>continue to NEXT layer"]
+        HALT["HALT — dev touched Play repo<br/>(integrity violation, not a retry failure)"]
     end
 
     subgraph DEV["dev — the only role that writes source"]
         D1["read decisions.md,<br/>Play source, migrated sibling"]
-        D2["migrate-app --layer X"]
+        D2["migrate-app --layer X<br/>--batch-size N (one pass)"]
         D3["mvn compile, fix errors<br/>until clean or honest blocker"]
-        D4["append to journal.ndjson"]
+        D4["append to journal.ndjson<br/>(count + remaining)"]
     end
 
     subgraph QA["QA — dispatched only on ambiguity"]
@@ -94,7 +106,7 @@ flowchart TD
 
     DISPATCH --> D1 --> D2 --> D3 --> D4
     D4 --> FOLD --> GUARD
-    GUARD -->|"NOT empty — dev touched Play"| ESC
+    GUARD -->|"NOT empty — dev touched Play"| HALT
     GUARD -->|empty| GATE
     GATE --> NEED
 
@@ -107,12 +119,17 @@ flowchart TD
 
     RECORD --> COUNT
     COUNT -->|yes| DISPATCH
-    COUNT -->|"no — 3 attempts"| ESC
+    COUNT -->|"no — 3 attempts on this batch"| ESC
+
+    COMMIT --> MORE
+    MORE -->|"yes — next batch"| DISPATCH
+    MORE -->|no| DONE
 
     style DEV fill:#e8f5e9,stroke:#2e7d32,color:#000
     style QA fill:#fde7e9,stroke:#c62828,color:#000
     style MGR fill:#e3f2fd,stroke:#1565c0,color:#000
     style ESC fill:#fff3cd,stroke:#b8860b,color:#000
+    style HALT fill:#f8d7da,stroke:#c62828,color:#000
     style GATE fill:#d1ecf1,stroke:#0c5460,color:#000
 ```
 
@@ -136,8 +153,13 @@ persistently wrong.
 A finding like `ContentService.search: 24 statements in Play -> 1 in Spring`
 points at the cause.
 
-**Attempts are bounded.** Three tries, then a human sees one file rather than a
-transcript. Repeating a failing approach does not make it work.
+**Attempts are bounded, per batch.** Three tries on the *current batch*, then
+the layer joins `failed_layers` and the run moves on to the next layer instead
+of stopping — a human reads one escalation file covering that batch, via the
+chat summary or `report.html`, rather than a transcript of the whole layer and
+rather than being interrupted mid-run. The counter resets when a batch passes,
+so a layer with several easy batches and one hard one escalates only on the
+hard one. Repeating a failing approach does not make it work.
 
 ---
 
@@ -226,8 +248,8 @@ flowchart LR
 [PNG](flow-4-write-ownership.png)
 
 - **Only dev writes source**, and only into the Spring tree. Enforced by tool
-  grants in `.claude/agents/`; backstopped by the `git status` guard on the Play
-  repo after every dispatch.
+  grants in this plugin's `agents/` directory; backstopped by the `git status`
+  guard on the Play repo after every dispatch.
 - **Only the manager writes state.** Two writers corrupt the file, and a subagent
   killed mid-write leaves JSON that cannot be resumed from.
 - **Dev's journal is append-only.** A subagent's context dies with it; the

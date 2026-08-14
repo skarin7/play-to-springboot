@@ -25,11 +25,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 try:
-    from layers import (LAYER_ORDER, classify, divergences, empty_counts,
-                        jar_has_layer_fix, load_overrides)
+    from layers import LAYER_ORDER, classify, empty_counts, load_overrides
 except ImportError:  # invoked as a module rather than a script
-    from .layers import (LAYER_ORDER, classify, divergences, empty_counts,
-                         jar_has_layer_fix, load_overrides)
+    from .layers import LAYER_ORDER, classify, empty_counts, load_overrides
 
 # Segment names the classifier actually recognizes. A directory outside this
 # set that keeps showing up among files landing in "other" is a strong signal
@@ -107,56 +105,6 @@ def classification_smell(
     }
 
 
-def check_jar(
-    play_repo: Path,
-    jar_override: Path | None,
-    rel_paths: list[str],
-) -> dict[str, Any]:
-    """
-    Report whether the dev-toolkit JAR in use predates the LayerDetector fix.
-
-    Inspects the JAR itself. An earlier version of this check instead asked
-    "would a pre-fix JAR misclassify these paths?", which is a property of the
-    project layout, not of the JAR -- so it fired on every flat-layout project
-    forever, including correctly configured ones. A check that always complains
-    is a check nobody reads.
-
-    The affected-file list is only computed when the JAR is actually old, where
-    it tells you what will break.
-    """
-    jar = jar_override or (play_repo / "dev-toolkit-1.0.0.jar")
-    has_fix = jar_has_layer_fix(jar)
-
-    if has_fix is True:
-        return {"path": str(jar), "status": "current"}
-
-    if has_fix is None:
-        return {
-            "path": str(jar),
-            "status": "not_found",
-            "note": (
-                "No readable dev-toolkit JAR here, so its version could not be "
-                "confirmed. Run setup to copy the current one from the kit's lib/."
-            ),
-        }
-
-    affected = divergences(rel_paths)
-    return {
-        "path": str(jar),
-        "status": "stale",
-        "note": (
-            "This JAR predates the LayerDetector segment-matching fix. It will "
-            "migrate the files below in the wrong layer -- controllers land in "
-            "'other' and never receive @RestController. Replace it with the JAR "
-            "from the kit's lib/."
-        ),
-        "affected": [
-            {"path": d.path, "correct_layer": d.correct, "old_jar_layer": d.jar_actual}
-            for d in affected
-        ],
-    }
-
-
 def inventory_tree(
     source_root: Path | None,
     java_root_label: str,
@@ -189,12 +137,6 @@ def main() -> int:
         "--play-java-root",
         default=None,
         help="Java source dir under the Play repo (default: app).",
-    )
-    parser.add_argument(
-        "--jar",
-        type=Path,
-        default=None,
-        help="dev-toolkit JAR to version-check (default: <play-repo>/dev-toolkit-1.0.0.jar).",
     )
     parser.add_argument(
         "--collapsed-threshold",
@@ -253,15 +195,6 @@ def main() -> int:
             )
         else:
             rel_paths, _ = scan(root)
-            jar_status = check_jar(play_repo, args.jar, rel_paths)
-            out["toolkit_jar"] = jar_status
-            if jar_status["status"] == "stale":
-                print(
-                    f"[warn] dev-toolkit JAR at {jar_status['path']} predates the "
-                    f"LayerDetector fix; {len(jar_status['affected'])} file(s) will "
-                    f"migrate in the wrong layer. Replace it from the kit's lib/.",
-                    file=sys.stderr,
-                )
             out["mode"] = (
                 "collapsed"
                 if out["play"]["total_java_files"] < args.collapsed_threshold

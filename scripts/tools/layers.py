@@ -11,9 +11,10 @@ Two classifiers live here on purpose:
 
 ``classify_legacy``
     The substring-matching version that shipped in dev-toolkit JARs before the
-    segment-matching fix. Retained to detect a **stale JAR**: a Play repo may
-    still have an old ``dev-toolkit-1.0.0.jar`` copied into it from a previous
-    setup run, and that JAR will classify differently from these rules.
+    segment-matching fix. Retained as a regression guard: it is what the JAR's
+    ``LayerDetector`` implemented before that fix, and comparing against it is
+    how a future LayerDetector regression would be caught before it silently
+    mis-migrates a layer.
 
 The two disagree on Play's default scaffold layout (``app/controllers/X.java``,
 ``package controllers;``). ``LayerDetector`` receives paths relative to ``app/``,
@@ -21,15 +22,13 @@ so that file arrived as ``controllers/X.java`` -- which does not contain the
 substring ``/controllers/`` -- and fell through to OTHER. It then migrated in the
 ``other`` layer and never received ``@RestController``.
 
-``divergences`` reports every file the two classifiers disagree about. On a
-current JAR the list is empty; a non-empty list means the JAR in use predates
-the fix and will mis-migrate those files.
+``divergences`` reports every file the two classifiers disagree about. On the
+current dev-toolkit JAR the list is empty.
 """
 
 from __future__ import annotations
 
 import json
-import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Iterable, NamedTuple
 
@@ -130,27 +129,6 @@ def classify_legacy(path_relative_to_source_root: str) -> str:
     if "/repositories/" in path or "/dao/" in path:
         return "repository"
     return "other"
-
-
-# Shipped in the same commit as the LayerDetector segment-matching fix, so its
-# presence in a JAR is a reliable marker that the fix is in. The JAR filename is
-# hardcoded dev-toolkit-1.0.0.jar and never bumped, so the name cannot tell fixed
-# from unfixed builds -- and stale copies of the toolkit source still exist.
-_FIX_MARKER_CLASS = "com/phenom/devtoolkit/SignatureExtractor.class"
-
-
-def jar_has_layer_fix(jar_path: Path) -> bool | None:
-    """
-    True if the JAR post-dates the LayerDetector fix, False if it predates it,
-    None if it cannot be inspected (missing file, not a zip).
-
-    A zip entry lookup, so this costs nothing -- no JVM start-up.
-    """
-    try:
-        with zipfile.ZipFile(jar_path) as jar:
-            return _FIX_MARKER_CLASS in jar.namelist()
-    except (OSError, zipfile.BadZipFile):
-        return None
 
 
 class Divergence(NamedTuple):

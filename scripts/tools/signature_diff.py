@@ -2,8 +2,9 @@
 """
 T2 structural preservation: compare Play signatures against Spring signatures.
 
-    java -jar dev-toolkit-1.0.0.jar signature <play>/app        > play.json
-    java -jar dev-toolkit-1.0.0.jar signature <spring>/src/main/java > spring.json
+    JAR=$(python3 scripts/tools/fetch_jar.py)
+    java -jar "$JAR" signature <play>/app        > play.json
+    java -jar "$JAR" signature <spring>/src/main/java > spring.json
     python3 scripts/tools/signature_diff.py --play play.json --spring spring.json \\
         --layer service --layer-only
 
