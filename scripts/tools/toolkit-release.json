@@ -1,6 +1,5 @@
 {
   "version": "1.0.0",
   "download_url": "https://github.com/skarin7/play-to-spring-boot-migration-agent/releases/download/toolkit-v1.0.0/dev-toolkit-1.0.0.jar",
-  "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-  "notes": "Placeholder pin. The java-dev-toolkit release workflow (java-dev-toolkit/.github/workflows/release-toolkit.yml, tracked separately in the play-to-spring-boot-migration-agent repo) has to publish a real toolkit-v1.0.0 GitHub Release before this sha256 is real. Replace version/download_url/sha256 with the values from that release, in the same commit as any plugin.json version bump for a toolkit change."
+  "sha256": "c17f17db6435180a4c5a1f41f07546327f4584833740972127b2ddeaedb7ac8a"
 }
