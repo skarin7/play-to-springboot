@@ -27,16 +27,53 @@ re-runs the gate afterwards to verify — not to find out.
 
   This is the reason a clean compile is necessary and not sufficient. Owning the
   compile means fixing the code until it builds, not making the error go away.
+- **Never write a method whose only purpose is to satisfy a checker.** A method
+  that exists so a name-match check finds it — the right name, the wrong
+  paradigm, no caller — is worse than the finding it silences: the finding was
+  true and visible, the shim is false and invisible. If a check fires on
+  something you believe is a legitimate interface change (Play's
+  `EssentialFilter.apply` becoming Spring's `Filter.doFilter`, for instance),
+  report it as an exemption question in your summary. The architect decides;
+  you do not paper over it.
+- **Never port a view template or a static asset.** `app/**/*.scala.html`,
+  `public/**`, `conf/messages*` and `*.scala` are out of scope (see the
+  `out_of_scope` block in `migration-status.json`). Do not hand-translate them
+  into Thymeleaf, JSP, or anything else. A compile error that references
+  `views.html.*` is fixed by **removing the dependency on the template** and
+  reporting it — the controller returns data, not a rendered page.
 
-## Pull your own context
+## Read once, then work from what you have
 
-<!-- generic -->
-Before fixing anything, read: `.migration/decisions.md` (binding), the relevant
-part of `.migration/research.md`, the Play source of the file you are fixing, and
-the nearest already-migrated sibling in the Spring tree. That last one matters
-most — it shows the conventions this migration has actually settled on, which is
-what keeps output consistent rather than plausible-looking.
-<!-- /generic -->
+Pull your context **on your first iteration only**, and to this budget:
+
+| Read | How much | How often |
+|---|---|---|
+| `.migration/decisions.md` | whole file (it is binding) | once per dispatch |
+| `.migration/research.md` | **Grep it** for what you need — never a full read | as needed |
+| Play source | only the files in **this batch** | once each |
+| A migrated sibling in the Spring tree | **one**, for conventions | once per **layer**, not per file |
+
+The sibling read is the one that matters most: it shows the conventions this
+migration has actually settled on, which keeps output consistent rather than
+plausible-looking. One is enough — the second tells you nothing the first did
+not.
+
+Then work from what you have. Re-reading the same four artifacts on every
+compile iteration is the single largest waste in a run: it costs a full context
+refill per loop to re-learn something that has not changed since you read it.
+The files do not change between your own iterations — you are the only writer.
+
+### Fix mode
+
+When the brief carries finding IDs (`Mode: fix`), reading collapses to:
+
+1. the findings themselves, from `qa_findings` in `migration-status.json`,
+2. the file each finding names,
+3. a **Grep** of `decisions.md` for the specific idiom in question.
+
+Nothing else. A finding carries its own evidence; re-deriving the whole
+migration's context to act on one of them is how a two-minute fix becomes an
+eight-minute dispatch.
 
 ## Journal as you go
 
@@ -117,6 +154,10 @@ and your working directory is not guaranteed to be the Play repo):
 java -jar "$DEV_TOOLKIT_JAR" migrate-app --source <play-repo> --layer <layer> --batch-size <N> --target <spring-repo>
 ```
 
+Set the Bash tool's `timeout` to **600000** for this call — the default 120000
+is not enough for a batch on a cold JVM, and a killed transform leaves half a
+batch on disk with no error to read.
+
 `<N>` is `batch_size` from `workspace.yaml`. Already-migrated files are
 skipped, so a later dispatch picking up the same layer is safe to repeat.
 
@@ -155,12 +196,28 @@ This task is not optional and it is not someone else's. A layer is not done
 until you have compiled it.
 
 ```bash
-cd <spring-repo> && mvn compile 2>&1 | tee /tmp/mvn-<layer>.log
+mvn -B compile > "<spring-repo>/.migration/logs/mvn-<layer>-dev.log" 2>&1; echo "exit=$?"
 ```
+
+Run that with the Bash tool's **`timeout` set to 900000** (15 minutes), and the
+same explicit timeout of **600000** on every `java -jar ... migrate-app` call.
+Both numbers matter:
+
+- The Bash tool's default is **120000ms**. A cold-cache Maven build exceeds it,
+  the harness kills the command, and you are handed a *truncated* log with no
+  indication that it is truncated. Every fix you derive from it is a guess about
+  a build that never finished.
+- `2>&1 | tee` reports **tee's** exit code, not Maven's — a failed build looks
+  like a successful one. Redirect and echo `$?` instead. `-B` keeps the log free
+  of the progress spinner's control characters.
 
 Loop until clean:
 
-1. Run `mvn compile`, capture the log.
+0. **Do not re-read `decisions.md`, `research.md`, or the Play sources between
+   iterations.** You read them at the start of this dispatch and nothing has
+   changed them since — you are the only writer here. Read only the specific
+   Spring file an error names.
+1. Run `mvn -B compile` as above, redirected to the log.
 2. `python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/parse_mvn.py" --log <log>` for structured errors.
 3. Fix, working by category rather than line by line:
    - **cannot find symbol** → missing import, or a class whose layer has not been
@@ -184,6 +241,33 @@ points to.
 
 A `logic-dropped` finding means a method was hollowed out. Port the real logic
 from the Play source. Do not adjust the method to make the check pass.
+
+## Record what you had no rule for
+
+Separately from the journal, append one line to
+`.migration/gaps.jsonl` whenever you had to **decide something this kit gave you
+no rule for**:
+
+```json
+{"kind":"unhandled_idiom","subject":"play.libs.Akka.system()","role":"dev",
+ "what_i_did":"hand-ported to @Async","blind_tier":"T2","layer":"service"}
+```
+
+`kind` is one of `unhandled_idiom`, `unmapped_dependency`, `agent_improvised`,
+`tier_blind_spot`, `tool_error`. Use `subject` for the **framework** symbol —
+`play.mvc.X`, a Maven coordinate — not for the repo's own class names.
+
+`what_i_did` is the field that matters. "Hand-ported to `@Async`" is worth a
+release; "could not find a mapping" is worth nothing. Write what you chose.
+
+Record it **even when the compile is clean.** A gap that produced a green build
+is the one nobody will ever find by looking at failures — the fake method that
+satisfied a checker and the template ported into a framework nobody chose were
+both green when they happened.
+
+This is not a finding. A finding says the migration is wrong and you fix it. A
+gap says the *plugin* is missing a rule, and it stays true after this run
+succeeds. See [docs/GAPS.md](../docs/GAPS.md).
 
 ## Report back
 

@@ -36,6 +36,10 @@ _KNOWN_SEGMENTS = {
     "controllers", "service", "services", "models", "db", "repositories", "dao",
 }
 
+# Below this many Java files, the "other" ratio is not a measurement. See
+# classification_smell().
+DEFAULT_SMELL_MIN_FILES = 10
+
 
 def iso_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -72,8 +76,64 @@ def scan(
     return rel_paths, counts
 
 
+# Everything a Play repo contains that this migration does not translate. They
+# are invisible to every other tool here (all of which rglob("*.java")), and
+# invisible is what let an earlier run hand-port three Twirl templates into
+# Thymeleaf -- work no tier can verify, against a decision nobody recorded.
+# Counting them is what makes the exclusion a stated policy instead of an
+# accident.
+_OUT_OF_SCOPE_CATEGORIES: tuple[tuple[str, str, str], ...] = (
+    ("twirl_templates", "app", "**/*.scala.html"),
+    ("scala_sources", "app", "**/*.scala"),
+    ("static_assets", "public", "**/*"),
+    ("i18n_messages", "conf", "messages*"),
+)
+
+_OUT_OF_SCOPE_POLICY = "left-in-place"
+_SAMPLE_LIMIT = 5
+
+
+def scan_non_java(play_repo: Path) -> dict[str, Any]:
+    """
+    Count the Play files this migration deliberately does not translate.
+
+    Reported, not filtered: nothing downstream reads *.scala.html in the first
+    place, so the problem was never that these files leak into the migration --
+    it is that no one could see they existed, so the architect designed for them
+    and dev ported them.
+    """
+    categories: dict[str, Any] = {}
+    seen: set[str] = set()
+    total = 0
+    for name, root_name, pattern in _OUT_OF_SCOPE_CATEGORIES:
+        root = play_repo / root_name
+        if not root.is_dir():
+            categories[name] = {"count": 0, "samples": []}
+            continue
+        # Each path lands in exactly one category, first pattern wins, so the
+        # counts sum to total rather than double-counting overlapping globs.
+        found = []
+        for f in root.glob(pattern):
+            if not f.is_file():
+                continue
+            rel = str(f.relative_to(play_repo)).replace("\\", "/")
+            if rel not in seen:
+                seen.add(rel)
+                found.append(rel)
+        found.sort()
+        categories[name] = {"count": len(found), "samples": found[:_SAMPLE_LIMIT]}
+        total += len(found)
+
+    return {
+        "captured_at": iso_now(),
+        "policy": _OUT_OF_SCOPE_POLICY,
+        "total_files": total,
+        "categories": categories,
+    }
+
+
 def classification_smell(
-    rel_paths: list[str], threshold: float = 0.15
+    rel_paths: list[str], threshold: float = 0.15, min_files: int = DEFAULT_SMELL_MIN_FILES
 ) -> dict[str, Any]:
     """
     Statistical check that classification looks wrong, computed from data
@@ -85,6 +145,12 @@ def classification_smell(
     ``.migration/layer-overrides.json`` at Gate 1. Always computed against the
     raw (non-overridden) classification -- that is the signal this exists to
     surface, not to hide.
+
+    A percentage needs a sample. On an 8-file repo a single ``Module.java``
+    is 12.5% and two are 25%, so the warning fires on the *normal* shape of a
+    small Play project and asks for an overrides file that would correct
+    nothing. Below ``min_files`` the ratio is reported but does not warn, and
+    ``warn_suppressed_reason`` says why -- suppressed, never silent.
     """
     total = len(rel_paths)
     other_paths = [p for p in rel_paths if classify(p) == "other"]
@@ -97,11 +163,28 @@ def classification_smell(
                 dir_counts[part] = dir_counts.get(part, 0) + 1
     common = sorted(dir_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
 
+    over_threshold = other_pct >= threshold
+    # A recurring unmapped directory is the actual evidence of a misnamed
+    # layout. Three stray files in three different directories is just a repo
+    # with some odd corners.
+    has_pattern = len(other_paths) >= 3 or bool(common)
+    warn = total >= min_files and over_threshold and has_pattern
+
+    reason = None
+    if not warn and over_threshold:
+        if total < min_files:
+            reason = f"sample too small ({total} < {min_files})"
+        elif not has_pattern:
+            reason = "no recurring unmapped directory among the 'other' files"
+
     return {
         "other_pct": round(other_pct, 4),
         "common_unmapped_dirs": [[name, count] for name, count in common],
-        "warn": other_pct >= threshold,
+        "warn": warn,
+        "warn_suppressed_reason": reason,
         "threshold": threshold,
+        "min_files": min_files,
+        "total_files": total,
     }
 
 
@@ -129,7 +212,19 @@ def inventory_tree(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Per-layer Java source counts for Play and Spring trees (JSON to stdout)."
+        description="Per-layer Java source counts for Play and Spring trees (JSON to stdout).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  inventory.py --play-repo ../play\n"
+            "  inventory.py --play-repo ../play --spring-repo ../spring\n"
+            "  inventory.py --play-repo ../play --smell-min-files 25\n"
+            "  inventory.py --play-repo ../play --layer-overrides "
+            "../spring/.migration/layer-overrides.json\n"
+            "\n"
+            "Also reports out_of_scope: Twirl templates, static assets and i18n\n"
+            "bundles, which this migration does not translate.\n"
+        ),
     )
     parser.add_argument("--play-repo", type=Path, default=None)
     parser.add_argument("--spring-repo", type=Path, default=None)
@@ -149,6 +244,14 @@ def main() -> int:
         type=float,
         default=0.15,
         help="Warn when this fraction (or more) of Play files land in 'other' (default: 0.15).",
+    )
+    parser.add_argument(
+        "--smell-min-files",
+        type=int,
+        default=DEFAULT_SMELL_MIN_FILES,
+        help=f"Minimum Play file count before the 'other' ratio can warn "
+             f"(default: {DEFAULT_SMELL_MIN_FILES}). Below it the ratio is still "
+             "reported, with warn_suppressed_reason.",
     )
     parser.add_argument(
         "--layer-overrides",
@@ -188,6 +291,7 @@ def main() -> int:
         root = find_play_java_root(play_repo, args.play_java_root)
         label = args.play_java_root or "app"
         out["play"] = inventory_tree(root, label, overrides, exclude)
+        out["out_of_scope"] = scan_non_java(play_repo)
         if root is None:
             print(
                 f"[warn] no Java source root at {play_repo / label}",
@@ -200,13 +304,21 @@ def main() -> int:
                 if out["play"]["total_java_files"] < args.collapsed_threshold
                 else "full"
             )
-            smell = classification_smell(rel_paths, args.other_threshold)
+            smell = classification_smell(
+                rel_paths, args.other_threshold, args.smell_min_files
+            )
             out["classification_smell"] = smell
             if smell["warn"]:
                 print(
                     f"[warn] {smell['other_pct']:.0%} of Play files classify as "
                     f"'other'; common unmapped dirs: {smell['common_unmapped_dirs']}. "
                     f"Consider drafting .migration/layer-overrides.json at Gate 1.",
+                    file=sys.stderr,
+                )
+            elif smell["warn_suppressed_reason"]:
+                print(
+                    f"[info] {smell['other_pct']:.0%} of Play files classify as "
+                    f"'other', but not warning: {smell['warn_suppressed_reason']}.",
                     file=sys.stderr,
                 )
 

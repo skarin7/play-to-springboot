@@ -26,10 +26,20 @@ from typing import Any
 
 try:
     from layers import LAYER_ORDER, classify, empty_counts, load_overrides
-    from routes import compare_routes, parse_play_routes, parse_spring_mappings
+    from routes import (
+        compare_routes,
+        parse_play_routes,
+        parse_spring_mappings,
+        parse_static_resource_handlers,
+    )
 except ImportError:
     from .layers import LAYER_ORDER, classify, empty_counts, load_overrides
-    from .routes import compare_routes, parse_play_routes, parse_spring_mappings
+    from .routes import (
+        compare_routes,
+        parse_play_routes,
+        parse_spring_mappings,
+        parse_static_resource_handlers,
+    )
 
 
 def iso_now() -> str:
@@ -94,7 +104,17 @@ def compare(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Play vs Spring per-layer completeness comparison (JSON to stdout)."
+        description="Play vs Spring per-layer completeness comparison (JSON to stdout).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  verify.py --play-repo ../play --spring-repo ../spring\n"
+            "  verify.py --play-repo ../play --spring-repo ../spring \\\n"
+            "      --status-file ../spring/migration-status.json\n"
+            "  verify.py --play-repo ../play --spring-repo ../spring --skip-routes\n"
+            "\n"
+            "Exit codes: 0 passed, 1 needs_review or failed.\n"
+        ),
     )
     parser.add_argument("--play-repo", type=Path, required=True)
     parser.add_argument("--spring-repo", type=Path, required=True)
@@ -128,6 +148,13 @@ def main() -> int:
         type=Path,
         default=None,
         help="Play routes file (default: <play-repo>/conf/routes).",
+    )
+    parser.add_argument(
+        "--assets-policy",
+        choices=("skip", "require"),
+        default="skip",
+        help="skip (default): Play's built-in asset routes and Twirl view handlers "
+             "are reported out_of_scope rather than missing. Must match gate.py.",
     )
     args = parser.parse_args()
 
@@ -178,9 +205,22 @@ def main() -> int:
         )
         play_routes, route_notes = parse_play_routes(routes_file)
         spring_routes = parse_spring_mappings(spring_root)
-        parity = compare_routes(play_routes, spring_routes)
+        # Same inputs as gate.py's T3. A completeness check that disagreed with
+        # the gate about what "missing" means would just teach the reader that
+        # one of them is wrong.
+        parity = compare_routes(
+            play_routes,
+            spring_routes,
+            static_routes=parse_static_resource_handlers(spring_repo),
+            assets_policy=args.assets_policy,
+        )
         parity["notes"] = route_notes
         result["route_parity"] = parity
+        if parity.get("out_of_scope"):
+            result["notes"] += (
+                f"; {len(parity['out_of_scope'])} Play route(s) classified out of "
+                "scope (assets/views)"
+            )
         if parity["status"] != "passed":
             result["status"] = "failed"
             result["notes"] += (

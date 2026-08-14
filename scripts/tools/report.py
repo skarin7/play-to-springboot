@@ -123,6 +123,77 @@ def render_endpoint_verification(ev: dict[str, Any] | None) -> str:
     )
 
 
+def render_exemptions(arch: dict[str, Any]) -> str:
+    """
+    T2 suppressions, and whether the approved set is still the one in effect.
+
+    Rendered even when empty, and rendered loudly when the file changed after
+    approval: an exemption is a blocker that was decided not to be one, so the
+    reviewer needs to see the decision, not just its effect.
+    """
+    entries = arch.get("exemptions") or []
+    modified = bool(arch.get("exemptions_modified_after_gate"))
+    warning = ""
+    if modified:
+        warning = (
+            "<p class=\"alert\"><strong>signature-exemptions.json changed after "
+            "Gate 1 approval.</strong> The suppressions below are not the set the "
+            "human approved.</p>"
+        )
+    if not entries:
+        return warning + (
+            "<p class=\"empty\">No project-specific T2 exemptions. "
+            "Framework-glue defaults still apply — see any <code>suppressed</code> "
+            "entries in the gate output.</p>"
+        )
+    rows = []
+    for e in entries:
+        if isinstance(e, str):
+            e = {"method": e}
+        rows.append(
+            f"<tr>"
+            f"<td>{esc(e.get('class'))}</td>"
+            f"<td>{esc(e.get('method'))}</td>"
+            f"<td>{esc(e.get('replacement'))}</td>"
+            f"<td>{esc(e.get('reason'))}</td>"
+            f"</tr>"
+        )
+    return warning + (
+        "<table><thead><tr><th>Class</th><th>Method</th><th>Replaced by</th>"
+        "<th>Reason</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+    )
+
+
+def render_out_of_scope(oos: dict[str, Any] | None) -> str:
+    """
+    What the migration deliberately did not translate.
+
+    Present even when empty. An exclusion nobody can see is indistinguishable
+    from an omission, and the reader has no other way to learn that the Twirl
+    templates in the source repo were a decision rather than a gap.
+    """
+    if not oos or not oos.get("categories"):
+        return "<p class=\"empty\">No out-of-scope inventory recorded.</p>"
+    rows = []
+    for name, entry in (oos.get("categories") or {}).items():
+        entry = entry or {}
+        samples = entry.get("samples") or []
+        rows.append(
+            f"<tr>"
+            f"<td>{esc(name.replace('_', ' '))}</td>"
+            f"<td>{esc(entry.get('count', 0))}</td>"
+            f"<td>{esc(', '.join(samples)) if samples else '<em>(none)</em>'}</td>"
+            f"</tr>"
+        )
+    return (
+        f"<p>Policy: <strong>{esc(oos.get('policy', 'left-in-place'))}</strong> — "
+        f"{esc(oos.get('total_files', 0))} file(s) left in the Play repo, not "
+        "migrated and not verified by any tier.</p>"
+        "<table><thead><tr><th>Category</th><th>Files</th><th>Samples</th>"
+        "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+    )
+
+
 def render_commits(commits: dict[str, Any], spring_repo: Path | None) -> str:
     if not commits:
         return "<p class=\"empty\">No commits recorded.</p>"
@@ -173,6 +244,8 @@ tr.failed-row { background: rgba(220,53,69,0.12); }
 .stat .n { font-size: 1.6rem; font-weight: 600; display: block; }
 .stat .label { color: #666; font-size: 0.85rem; }
 .empty { color: #666; font-style: italic; }
+.alert { background: rgba(220,53,69,0.12); border: 1px solid #dc3545;
+         border-radius: 0.4rem; padding: 0.6rem 0.9rem; }
 """
 
 
@@ -181,6 +254,8 @@ def render_report(status: dict[str, Any], spring_repo: Path | None, generated_at
     failed_layers = set(status.get("failed_layers") or [])
     qa_findings = status.get("qa_findings") or []
     endpoint_verification = status.get("endpoint_verification")
+    out_of_scope = status.get("out_of_scope")
+    architecture_review = status.get("architecture_review") or {}
     commits = status.get("commits") or {}
 
     done = sum(1 for e in layers.values() if (e or {}).get("status") == "done")
@@ -228,6 +303,10 @@ def render_report(status: dict[str, Any], spring_repo: Path | None, generated_at
 {render_findings_table(qa_findings)}
 <h2>Endpoint parity (T5)</h2>
 {render_endpoint_verification(endpoint_verification)}
+<h2>T2 exemptions</h2>
+{render_exemptions(architecture_review)}
+<h2>Out of scope</h2>
+{render_out_of_scope(out_of_scope)}
 <h2>Commits</h2>
 {render_commits(commits, spring_repo)}
 </body>
@@ -236,7 +315,18 @@ def render_report(status: dict[str, Any], spring_repo: Path | None, generated_at
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Example:\n"
+            "  report.py --status-file ../spring/migration-status.json \\\n"
+            "      --out ../spring/.migration/report.html\n"
+            "\n"
+            "Prints the path it wrote. Degrades to blanks on fields an older\n"
+            "status file does not carry.\n"
+        ),
+    )
     parser.add_argument("--status-file", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument(

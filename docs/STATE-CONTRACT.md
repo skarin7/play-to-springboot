@@ -136,8 +136,28 @@ keeps all its fields and gains the new ones. Legacy keys (`autonomous`,
     "decisions": ".migration/decisions.md",
     "layer_overrides": ".migration/layer-overrides.json",  // optional, see below
     "no_migration": ["Module.java"],   // subtracted by verify.py and signature_diff.py
-    "concerns": []
+    "concerns": [],
+    // T2 suppressions approved at Gate 1, and the sha of the file as approved.
+    // gate.py re-hashes every run and reports exemptions.modified_after_gate.
+    "exemptions": [ { "class", "method", "replacement", "reason" } ],
+    "exemptions_sha256": null,
+    "exemptions_modified_after_gate": false
   },
+
+  // What this migration does not translate. Seeded by inventory.py, confirmed
+  // by the architect, rendered in the report. Views are invisible to every
+  // *.java tool, so without this block an exclusion is indistinguishable from
+  // an omission.
+  "out_of_scope": { "captured_at", "policy": "left-in-place", "total_files",
+                    "categories": { "twirl_templates": { "count", "samples" },
+                                    "scala_sources": {}, "static_assets": {},
+                                    "i18n_messages": {} } },
+
+  // Scope declared at launch, from the skill's flags. Pre-declared because a
+  // message sent while a subagent runs never reaches it.
+  "run_config": { "skip_t5", "skip_tests", "no_boot", "mode_override",
+                  "max_dispatches", "assets_policy": "skip | require",
+                  "raw_arguments" },
 
   "source_inventory": { "captured_at", "play_java_root", "total_java_files", "by_layer" },
 
@@ -282,5 +302,22 @@ Role boundaries are enforced by subagent tool grants in this plugin's
 
 One honest gap: **Bash can write.** Researcher and QA need Bash to run `mvn`
 and the helper scripts, so the boundary is "does not write application
-source", not "cannot write at all". The `git status` guard on the Play repo is
-the real backstop.
+source", not "cannot write at all". The Play-repo guard is the real backstop.
+
+That guard is `scripts/tools/guard.py`, and it replaced a prose rule that never
+worked. The rule was "non-empty `git status --porcelain` means tampered" — but a
+Play repo that is not a git repository makes git exit 128 with **empty stdout**,
+which read as clean forever. The guard now:
+
+- picks `git` mode only when the Play repo is its own repository root, and a
+  **sha256 manifest** otherwise (which also catches gitignored files, and does
+  not create a nested repo inside someone's checkout);
+- returns an explicit `clean` | `tampered` | `error`, with **no path where an
+  empty result means clean** — a missing baseline is `error`;
+- exits 0 / 2 / 3 respectively, and `gate.py` runs it before T1 and
+  short-circuits to `"status": "halt"` with exit 4 on anything but `clean`.
+
+`error` halts exactly like `tampered`. A guard that cannot run is not a guard
+that passed. The plugin's `PreToolUse` hook (see `docs/PERMISSIONS.md`) denies
+Play-repo writes before they happen, which is prevention rather than detection —
+the guard remains the check that proves it held.

@@ -23,11 +23,56 @@ sees those at the gate.
 
 ## Input and output
 
-Read `.migration/research.md`. Write `.migration/decisions.md`. Return the
-dependency map, config map, idiom decisions, `no_migration` list, and concerns to
-the manager, which presents them at Gate 1.
+Read `.migration/research.md`. Write `.migration/decisions.md`, and
+`.migration/signature-exemptions.json` if §6 calls for one. Return the
+dependency map, config map, idiom decisions, `no_migration` list, out-of-scope
+counts (§0), exemptions (§6), and concerns to the manager, which presents them
+at Gate 1.
+
+## Collapsed mode
+
+When the brief says `Mode: collapsed`, no researcher ran and there is no
+`research.md` to read. Under 20 Java files, a separate survey dispatch costs a
+round trip and a full artifact write to tell you what you can see yourself in a
+handful of reads.
+
+So you do both jobs, in one pass:
+
+1. **Survey the repo directly** — `build.sbt`, `conf/application.conf`,
+   `conf/routes`, and the `app/` tree. Keep it to what a decision depends on.
+2. **Write a short `.migration/research.md`**: file counts per layer,
+   dependencies with their versions, the route list, and anything Play-specific
+   that has no obvious Spring shape. Three sections, not an essay — dev reads it
+   with Grep, not end to end.
+3. **Then write `decisions.md` as normal**, using everything below.
+
+Everything in this file applies unchanged. Collapsed mode removes a dispatch,
+not a decision — an unrecorded choice is just as expensive in a small repo,
+because dev still has nothing to consult.
 
 ## Decisions to make
+
+### 0. Out of scope — do not design for these
+
+This migration translates **Java sources only**. The following are left in the
+Play repo, untouched, and are recorded in `out_of_scope` in
+`migration-status.json` (seeded by `inventory.py`, which counts them for you):
+
+| Left in place | Not your problem |
+|---|---|
+| `app/**/*.scala.html` (Twirl templates) | Do **not** choose a template engine |
+| `app/**/*.scala` | Not migrated; no Scala decision to make |
+| `public/**` (static assets) | Spring serves these from configuration |
+| `conf/messages*` (i18n bundles) | No message-source decision required |
+
+Confirm the counts in your return summary so the human sees them at Gate 1. If
+you believe something in that list genuinely must be migrated, say so as a
+`concern` — do not quietly design for it.
+
+**Why this is a rule and not a preference.** Every tier here reads `*.java`. A
+Thymeleaf port of a Twirl template compiles, passes T1, and is invisible to
+T2, T3, and T5 — no check in this kit can tell whether it is right. Work no
+tier can verify is work nobody can review.
 
 ### 1. Dependency map — `build.sbt` → `pom.xml`
 
@@ -51,6 +96,12 @@ Anything the researcher flagged as having no counterpart needs an explicit
 decision: find a library, write an adapter, or drop the feature. Do not leave it
 implicit — that is the gap that becomes a stubbed-out method later, which QA's T2
 check will (rightly) flag as a blocker.
+
+**That rule covers code dependencies only.** Dependencies that exist to build
+things §0 puts out of scope — `sbt-twirl`, `play.twirl.api`, asset pipeline
+plugins — are dropped with the reason "out of scope", full stop. Do not find a
+library, do not write an adapter, and above all do not pick a template engine.
+"No Spring counterpart" is the answer for these, not a problem to solve.
 
 ### 2. Config map — `application.conf` → `application.properties`
 
@@ -90,6 +141,13 @@ and a check that always complains is a check nobody reads. Everything you list
 must genuinely have no counterpart — do not use it to hide files you simply do
 not want to deal with.
 
+The line is between *hidden* and *declared*. A file you drop in silently to
+quiet a check is the abuse this warns about. A file whose absence is stated
+here, echoed at Gate 1, and rendered in the report is a decision the human
+approved — that is the mechanism working, not a loophole in it. The same holds
+for the §0 out-of-scope categories, which are counted and reported rather than
+suppressed.
+
 ### 5. Layer classification exceptions
 
 If the researcher flagged files landing in an unexpected layer, decide: accept,
@@ -97,13 +155,84 @@ or migrate that file out of band. Note that `db/` is matched before
 `repositories/`, so `db/repositories/Foo.java` classifies as `manager` — usually
 harmless, occasionally wrong for dependency order.
 
-If inventory's `classification_smell` flags a high `other_pct` (default warn
-threshold 15%) or a recurring unmapped directory name, draft
+If inventory's `classification_smell` sets `warn: true` — at least 10 Play
+files, 15% or more of them landing in `other`, **and** a recurring unmapped
+directory among them — draft
 `.migration/layer-overrides.json`: prefix entries (keys ending in `/`) for whole
 misnamed directories, exact-path entries for individually blurred files — e.g. a
 `utils/` file that is really a repository. Present it alongside `decisions.md`
 at Gate 1. This is a correction, not a smarter classifier — every entry must
 reflect what the file actually is, not a shortcut to silence the warning.
+
+A `warn_suppressed_reason` instead of a warning means the ratio was high but the
+sample was too small to mean anything (an 8-file repo with one `Module.java` is
+12.5% "other" by arithmetic, not by misnaming). Read the raw `other_pct`, and
+write overrides only if you can point at a directory that is genuinely
+misnamed.
+
+### 6. T2 signature exemptions
+
+T2 flags a public Play method with no same-named Spring method as a **blocker**.
+Some of those are mandatory interface changes, not losses: Play's
+`EssentialFilter.apply` *has* to become `Filter.doFilter`. Left as a blocker,
+the cheapest way for dev to clear it is to add a public method with the old name
+that nothing calls — a shim that exists to be found by a regex. That is a
+correctness regression the check itself caused.
+
+You are the only role that authors exemptions. Write
+`.migration/signature-exemptions.json`:
+
+```json
+{
+  "exemptions": {
+    "ContentFilter": {
+      "apply": {"replacement": "doFilter", "reason": "Play EssentialFilter -> jakarta Filter"}
+    }
+  }
+}
+```
+
+Rules, in order of preference:
+
+1. **Prefer whole-class `no_migration`** (§4). If the class has no Spring
+   counterpart at all, list it there — `signature_diff.py` already subtracts it,
+   and one entry beats several.
+2. Use an exemption only when the class **is** migrated and a single method
+   changed shape.
+3. Every entry names a `replacement` — the Spring construct that took the job
+   over. "It's not needed" without a replacement is a dropped feature, which is
+   a `concern` for the human, not an exemption.
+4. Never add an entry to make a finding go away. If you cannot name what
+   replaced the method, the finding is correct.
+
+The framework-glue defaults (`Filters`, `*Filter`, `*ErrorHandler`, `Module`,
+`*Lifecycle`) ship with the tool — you do not need to restate them.
+
+Present the file with `decisions.md` at Gate 1. The manager records its sha on
+approval and `gate.py` re-hashes it every run, so a later edit shows up as
+`exemptions_modified_after_gate` rather than quietly suppressing more.
+
+## Record what this kit had no rule for
+
+`concerns` tells the human about *this* migration. A **gap** tells the plugin's
+author that the kit itself is missing something — a dependency with no mapping
+in §1's table, a Play idiom §3 does not cover, a repo layout the classifier did
+not expect.
+
+Append one line per gap to `.migration/gaps.jsonl`:
+
+```json
+{"kind":"unmapped_dependency","subject":"com.typesafe.play:play-mailer_2.13:8.0.1",
+ "role":"architect","what_i_did":"dropped it; no Spring counterpart decided"}
+```
+
+`kind` is one of `unmapped_dependency`, `unhandled_idiom`, `layout_surprise`,
+`agent_improvised`. Put the **framework** symbol or Maven coordinate in
+`subject`, never a class from the repo being migrated.
+
+A decision you made confidently can still be a gap: if you had to reason it out
+from first principles rather than read it from a table, the next architect
+will too. See [docs/GAPS.md](../docs/GAPS.md).
 
 ## `decisions.md` format
 

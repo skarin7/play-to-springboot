@@ -16,6 +16,9 @@ file written by an older version keeps all of its fields.
     python3 scripts/tools/state.py add-finding --status-file S --json '{...}'
     python3 scripts/tools/state.py fold-journal --status-file S --journal J --layer model
     python3 scripts/tools/state.py gate        --status-file S --name architecture --value approved
+
+``--status-file`` may go before or after the subcommand; both orders are
+accepted. ``--help`` on any subcommand lists its real flags.
 """
 
 from __future__ import annotations
@@ -62,6 +65,21 @@ def merge_status(raw: dict[str, Any]) -> dict[str, Any]:
     out.setdefault("current_step", "research")
     out.setdefault("mode", None)  # collapsed | full, chosen from inventory
 
+    # Scope decided at launch, from the skill's arguments. Pre-declared because
+    # a message sent mid-run reaches the manager but never a subagent already
+    # running -- "skip T5" said out loud while QA is booting an app is heard by
+    # nobody. What can be decided up front is decided up front; what cannot goes
+    # through .migration/run-control.json, which the manager re-reads at loop
+    # boundaries.
+    rc = out.setdefault("run_config", {})
+    rc.setdefault("skip_t5", False)
+    rc.setdefault("skip_tests", False)
+    rc.setdefault("no_boot", False)
+    rc.setdefault("mode_override", None)     # collapsed | full
+    rc.setdefault("max_dispatches", None)
+    rc.setdefault("assets_policy", "skip")   # skip | require
+    rc.setdefault("raw_arguments", None)
+
     init = out.setdefault("initialize", {})
     init.setdefault("status", "pending")
     init.setdefault("pom_generated", False)
@@ -83,6 +101,13 @@ def merge_status(raw: dict[str, Any]) -> dict[str, Any]:
     arch.setdefault("decisions", ".migration/decisions.md")
     arch.setdefault("no_migration", [])
     arch.setdefault("concerns", [])
+    # T2 suppressions the human approved at Gate 1, and the sha of the file as
+    # approved. gate.py re-hashes on every run: a set edited afterwards is
+    # reported rather than trusted, because suppressing blockers is the one
+    # power here worth watching.
+    arch.setdefault("exemptions", [])
+    arch.setdefault("exemptions_sha256", None)
+    arch.setdefault("exemptions_modified_after_gate", False)
 
     out.setdefault("qa_findings", [])
     out.setdefault("failed_layers", [])
@@ -101,6 +126,18 @@ def merge_status(raw: dict[str, Any]) -> dict[str, Any]:
 
     out.setdefault("source_inventory", None)
     out.setdefault("migration_verification", None)
+
+    # What this migration does not translate: Twirl templates, static assets,
+    # i18n bundles. Seeded from inventory.py, confirmed by the architect at
+    # Gate 1. It lives in state rather than in decisions.md because a policy
+    # only prose records is a policy the report cannot show and the tiers
+    # cannot honour -- which is how three Twirl templates got hand-ported into
+    # a template engine nobody chose.
+    oos = out.setdefault("out_of_scope", {})
+    oos.setdefault("captured_at", None)
+    oos.setdefault("policy", "left-in-place")
+    oos.setdefault("total_files", 0)
+    oos.setdefault("categories", {})
     # T5. None rather than {} so an unrun endpoint check is distinguishable from
     # one that ran and found nothing.
     out.setdefault("endpoint_verification", None)
@@ -259,32 +296,84 @@ def cmd_gate(args, status_path: Path) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[1])
-    parser.add_argument("--status-file", type=Path, required=True)
+    # --status-file is defined on a shared parent and attached to *every*
+    # subparser as well as the main parser, so both orders work:
+    #
+    #     state.py --status-file S show
+    #     state.py show --status-file S
+    #
+    # argparse otherwise accepts only the first, and rejects the second with a
+    # message about an unrecognised argument. That is a trap rather than a
+    # constraint: the tool's own docstring showed the rejected order for
+    # several versions, and every caller who copied it lost a round trip
+    # discovering the CLI instead of doing the work.
+    # default=SUPPRESS matters: without it the subparser writes its own default
+    # (None) over a value the main parser already read, so the "before" order
+    # would parse and then lose the path.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--status-file", type=Path, default=argparse.SUPPRESS,
+        help="Path to migration-status.json. May appear before or after the "
+             "subcommand.",
+    )
+
+    parser = argparse.ArgumentParser(
+        description=__doc__.split("\n")[1],
+        parents=[common],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples (S = <spring-repo>/migration-status.json):\n"
+            "  state.py init --status-file S\n"
+            "  state.py show --status-file S --path layers.service\n"
+            "  state.py set  --status-file S --path layers.service.status --value done\n"
+            "  state.py set  --status-file S --path run_config.skip_t5 --value true\n"
+            "  state.py add-finding --status-file S --json '{\"layer\":\"service\","
+            "\"file\":\"X.java\",\"tier\":\"T2\",\"severity\":\"blocker\","
+            "\"category\":\"method-missing\",\"evidence\":\"...\"}'\n"
+            "  state.py fold-journal --status-file S \\\n"
+            "      --journal .migration/journal/service-dev.ndjson --layer service\n"
+            "  state.py gate --status-file S --name architecture --value approved\n"
+            "\n"
+            "--value parses as JSON when it can (true, 3, [\"a\"]), else as a string.\n"
+        ),
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("init")
+    sub.add_parser("init", parents=[common], help="Create/normalise the status file.")
 
-    p_show = sub.add_parser("show")
+    p_show = sub.add_parser(
+        "show", parents=[common], help="Print the whole file, or one dotted path."
+    )
     p_show.add_argument("--path", default=None, help="Dotted path, e.g. layers.model")
 
-    p_set = sub.add_parser("set")
+    p_set = sub.add_parser("set", parents=[common], help="Set one dotted path.")
     p_set.add_argument("--path", required=True)
     p_set.add_argument("--value", required=True)
 
-    p_find = sub.add_parser("add-finding")
-    p_find.add_argument("--json", required=True)
+    p_find = sub.add_parser(
+        "add-finding", parents=[common],
+        help="Append a finding; prints the assigned id.",
+    )
+    p_find.add_argument(
+        "--json", required=True,
+        help="Requires layer, file, tier, severity. id/status/created_at are filled in.",
+    )
 
-    p_fold = sub.add_parser("fold-journal")
+    p_fold = sub.add_parser(
+        "fold-journal", parents=[common], help="Replay a dev NDJSON journal into state."
+    )
     p_fold.add_argument("--journal", type=Path, required=True)
     p_fold.add_argument("--layer", default=None)
 
-    p_gate = sub.add_parser("gate")
-    p_gate.add_argument("--name", required=True)
-    p_gate.add_argument("--value", required=True)
+    p_gate = sub.add_parser("gate", parents=[common], help="Record a human gate decision.")
+    p_gate.add_argument("--name", required=True, help="e.g. architecture")
+    p_gate.add_argument("--value", required=True, help="approved | revise")
 
     args = parser.parse_args()
-    status_path = args.status_file.expanduser().resolve()
+    status_file = getattr(args, "status_file", None)
+    if status_file is None:
+        parser.error("--status-file is required (before or after the subcommand)")
+    status_path = status_file.expanduser().resolve()
 
     handlers = {
         "init": cmd_init,

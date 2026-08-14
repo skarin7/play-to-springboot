@@ -23,6 +23,7 @@ KIT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PLAY_REPO=""
 WORKSPACE_DIR=""
 SPRING_NAME=""
+PRINT_PERMISSIONS=0
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -34,6 +35,10 @@ while [[ $# -gt 0 ]]; do
     --spring-name)
       SPRING_NAME="$2"
       shift 2
+      ;;
+    --print-permissions)
+      PRINT_PERMISSIONS=1
+      shift
       ;;
     -*)
       echo "Unknown option: $1"
@@ -54,6 +59,7 @@ if [[ -z "$PLAY_REPO" ]]; then
   echo "  <path-to-play-repo>   Absolute or relative path to the Play project directory"
   echo "  --workspace <dir>     Where to create spring-* and migration state (default: parent of Play repo)"
   echo "  --spring-name <name>  Spring project directory name (default: spring-<play-repo-basename>)"
+  echo "  --print-permissions   Print a paste-ready settings.json allow list for this workspace, then exit"
   exit 1
 fi
 
@@ -73,6 +79,44 @@ if [[ -z "$SPRING_NAME" ]]; then
 fi
 
 SPRING_REPO="${WORKSPACE_DIR}/${SPRING_NAME}"
+
+# --print-permissions: emit an allow list with *this* workspace's resolved
+# absolute paths, and scaffold nothing. Hand-copying rules between workspaces is
+# how a settings.local.json ends up full of paths from a session that ended
+# months ago, matching nothing and silently prompting for everything.
+if [[ $PRINT_PERMISSIONS -eq 1 ]]; then
+  cat <<EOF
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 ${KIT_ROOT}/scripts/tools/*.py:*)",
+      "Bash(python3 ${KIT_ROOT}/scripts/migration_orchestrator.py:*)",
+      "Bash(mvn -B compile:*)",
+      "Bash(mvn -B test:*)",
+      "Bash(mvn -B package:*)",
+      "Bash(mvn -B spring-boot:run:*)",
+      "Bash(git -C ${SPRING_REPO}:*)",
+      "Bash(git -C ${PLAY_REPO} status:*)",
+      "Bash(git -C ${PLAY_REPO} log:*)",
+      "Bash(git -C ${PLAY_REPO} diff:*)",
+      "Read(${PLAY_REPO}/**)",
+      "Edit(${SPRING_REPO}/**)",
+      "Write(${SPRING_REPO}/**)"
+    ],
+    "deny": [
+      "Edit(${PLAY_REPO}/**)",
+      "Write(${PLAY_REPO}/**)"
+    ]
+  }
+}
+EOF
+  echo "" >&2
+  echo "Paste the above into .claude/settings.local.json (or merge the arrays)." >&2
+  echo "The deny entries are the read-only Play invariant; keep them." >&2
+  echo "java -jar rules are omitted: the jar path is version-pinned per run;" >&2
+  echo "the plugin's PreToolUse hook allows it from \$CLAUDE_PLUGIN_DATA." >&2
+  exit 0
+fi
 
 echo "Play repo:     $PLAY_REPO"
 echo "Workspace:     $WORKSPACE_DIR"
@@ -121,6 +165,15 @@ spring_repo: $SPRING_REPO
 migration_root: $WORKSPACE_DIR
 batch_size: 25
 base_package: $BASE_PACKAGE
+
+# Timeouts (seconds unless stated). These are the tool defaults, written out so
+# they can be raised on a slow machine instead of being discovered as a
+# mysterious kill. dev_bash_timeout_ms is what dev passes to the Bash tool:
+# its 120000 default is shorter than a cold-cache Maven build.
+mvn_timeout: 900
+java_timeout: 300
+dev_bash_timeout_ms: 900000
+boot_timeout: 180
 EOF
 echo "Wrote $WORKSPACE_YAML"
 
@@ -175,11 +228,29 @@ else
   echo "Spring repo already under git (branch: ${current:-detached})"
 fi
 
+# Play-repo read-only guard. Note what is NOT happening here: the Play repo is
+# never git-init'ed. It is declared read-only, so writing .git/ into it would
+# contradict the invariant being enforced -- and if it sits inside a larger
+# checkout, init would create a nested repo. guard.py records a checksum
+# manifest instead whenever the Play repo is not a git root in its own right.
+GUARD_MODE="unknown"
+if python3 "$KIT_ROOT/scripts/tools/guard.py" baseline \
+      --play-repo "$PLAY_REPO" --spring-repo "$SPRING_REPO" > /tmp/p2sb-guard.$$ 2>&1; then
+  GUARD_MODE=$(python3 -c "import json,sys;print(json.load(open('/tmp/p2sb-guard.$$'))['mode'])" 2>/dev/null || echo "unknown")
+  echo "Play repo guard: mode=$GUARD_MODE (baseline in $SPRING_REPO/.migration/guard/)"
+else
+  echo "WARNING: could not record the Play-repo guard baseline:" >&2
+  cat /tmp/p2sb-guard.$$ >&2
+  echo "The migration will halt at the first gate until this is fixed." >&2
+fi
+rm -f /tmp/p2sb-guard.$$
+
 echo ""
 echo "=== Setup complete ==="
 echo ""
 echo "  Workspace:      $WORKSPACE_DIR"
 echo "  Play repo:      $PLAY_REPO  (READ-ONLY during migration)"
+echo "  Play guard:     mode=$GUARD_MODE"
 echo "  Spring project: $SPRING_REPO"
 echo "  Agent state:    $SPRING_REPO/migration-status.json (created by /play-to-springboot:migrate)"
 echo "  Agent scratch:  $SPRING_REPO/.migration/ (research, decisions, findings, journals)"

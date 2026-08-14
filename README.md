@@ -117,6 +117,60 @@ Gate 1, with the architect's decisions for your review; after you approve,
 the rest of the run — every layer, the final verification, the report — goes
 unattended.
 
+### Run flags
+
+```
+/play-to-springboot:migrate /path/to/your-play-app --skip-t5 --mode collapsed
+```
+
+| Flag | Effect |
+|---|---|
+| `--skip-t5` | No endpoint-parity dispatch, and no application is booted |
+| `--skip-tests` | Final gate runs T1–T3; T4 is reported `skipped`, never passed |
+| `--no-boot` | Nothing is launched at all (implies `--skip-t5`) |
+| `--mode collapsed\|full` | Override the inventory's role-mode choice |
+| `--max-dispatches N` | Stop and report after N subagent dispatches |
+| `--assets-policy skip\|require` | `require` demands real Spring mappings for Play's built-in asset routes |
+
+Flags are read once at launch, because a message sent while a **subagent** is
+running never reaches it — "skip T5" said mid-run is heard by nobody. To change
+scope during a run, write `<spring-repo>/.migration/run-control.json`
+(`{"skip_tiers":["T5"],"stop_after_layer":"controller","pause":false}`); the
+manager re-reads it at each loop boundary, which is when it has control.
+
+### Permissions
+
+A run is a few hundred invocations of about six commands. The plugin ships a
+`PreToolUse` hook that auto-allows its own path-scoped commands and **denies any
+write into the Play repo**. For an explicit allow list with your workspace's
+resolved paths:
+
+```bash
+bash scripts/setup.sh /path/to/your-play-app --print-permissions
+```
+
+Details and what is deliberately not granted: **[docs/PERMISSIONS.md](docs/PERMISSIONS.md)**.
+
+### Reporting gaps
+
+Your Play repo will contain something this kit has no rule for. When that
+happens an agent improvises, and that improvisation is invisible — the run can
+go green with a hand-ported template or a method that exists only to satisfy a
+check. Agents record those moments to `.migration/gaps.jsonl`, and:
+
+```bash
+python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/gap_report.py" render --spring-repo <spring>
+```
+
+writes a **redacted** `.migration/gap-report.md`: framework symbols and Maven
+coordinates verbatim, your class names and paths replaced with per-install
+salted hashes, no source and no finding text. **Nothing is uploaded** — there is
+no network code in that tool. Read it; share it on an issue if you want the gap
+fixed upstream.
+
+Full field list, the promotion rule, and what is deliberately not done:
+**[docs/GAPS.md](docs/GAPS.md)**.
+
 Check back on a run any time without re-running it:
 
 ```
@@ -188,17 +242,20 @@ play-to-springboot/                     (plugin root)
 ├── LICENSE
 ├── skills/{migrate,report}/SKILL.md    # /play-to-springboot:migrate, :report
 ├── agents/{researcher,architect,dev,qa}.md
+├── hooks/{hooks.json,allow_migration_tools.py}   # path-scoped auto-allow + Play-write deny
 ├── scripts/{setup.sh,migration_orchestrator.py,tools/}
 │   └── tools/toolkit-release.json      # pins {version, download_url, sha256}
 ├── config/workspace.example.yaml
-└── docs/{STATE-CONTRACT.md,ORCHESTRATION.md,play_to_spring_migration.md,FLOW.md}
+└── docs/{STATE-CONTRACT.md,ORCHESTRATION.md,PERMISSIONS.md,FLOW.md,...}
 
 workspace/                              (created per target Play repo)
-├── <play-repo>/                        # READ-ONLY during migration — untouched
-│                                        # by this plugin except for git status checks
+├── <play-repo>/                        # READ-ONLY during migration — never
+│                                        # written to; guard.py proves it
 ├── spring-<basename>/
 │   ├── migration-status.json           # single source of truth
 │   ├── .migration/                     # research.md, decisions.md, findings,
+│   │   ├── guard/                      # read-only baseline + last check
+│   │   ├── run/                        # T5 pidfiles and boot logs
 │   │                                   # journals, report.html
 │   └── src/main/java/
 ├── workspace.yaml
@@ -250,6 +307,19 @@ Things this design does not, and mostly cannot, guarantee:
   statement, does something subtly different." An inverted condition or an
   off-by-one passes T1–T4 clean; only T5 has a chance, and T5's mutating-verb
   coverage is GET-only by default.
+- **Views, static assets, and i18n bundles are not migrated at all.** Twirl
+  templates (`app/**/*.scala.html`), `public/**`, and `conf/messages*` are
+  counted into `out_of_scope` and left in the Play repo. Every tier here reads
+  `*.java`, so a hand-ported template would pass T1 and be invisible to T2, T3
+  and T5 — work no check in this kit can verify. The report says exactly what
+  was left behind; a migrated app that served HTML pages will not serve them.
+- **T2 exemptions can suppress a `blocker`.** Framework glue whose Spring
+  counterpart is a different interface (`Filter.apply` → `Filter.doFilter`) is
+  suppressed rather than reported, because reporting it made the cheapest fix a
+  fake method that satisfied a regex. Suppressions are listed in the gate output
+  and in the report, the architect authors them, and `gate.py` re-hashes the
+  file every run — but the mechanism is still a lever, and the report is where
+  you check it was not over-used.
 - **A layer that keeps failing doesn't stop the run — you find out at the
   end.** Dropping the per-layer review gate means a stuck layer runs to its
   3-attempt limit and gets recorded in `failed_layers` rather than

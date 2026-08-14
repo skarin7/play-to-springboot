@@ -58,7 +58,9 @@ Each prints JSON to stdout and does one thing.
 
 | Tool | Purpose |
 |---|---|
-| `gate.py` | **T1–T4 in one call**; one verdict, findings, and `needs_agent` |
+| `gate.py` | **Guard, then T1–T4 in one call**; one verdict, findings, and `needs_agent` |
+| `guard.py` | The Play-repo read-only guard: `clean` / `tampered` / `error`, exit 0 / 2 / 3 |
+| `boot.py` | Starts and (reliably) stops the apps T5 compares; process-group teardown |
 | `endpoint_diff.py` | **T5** endpoint response parity: probes, capture, diff |
 | `layers.py` | Layer classification; `classify_legacy`/`divergences` are a regression guard, not a live jar check |
 | `inventory.py` | Per-layer counts for both trees; picks `collapsed`/`full` role mode |
@@ -70,9 +72,11 @@ Each prints JSON to stdout and does one thing.
 | `fetch_jar.py` | Downloads, checksum-verifies, and caches the dev-toolkit jar |
 | `report.py` | Renders the self-contained `report.html` from `migration-status.json` |
 | `token_report.py` | Measured token/cost accounting from Claude Code transcripts |
+| `gap_report.py` | Redacted gap reporting; `aggregate` ranks gaps across received reports |
+| `workspace.py` | The one reader for `workspace.yaml`, and its key allowlist |
 
 ```bash
-python3 scripts/tools/test_tools.py     # 96 tests, stdlib only
+python3 scripts/tools/test_tools.py     # stdlib only, no dependencies
 ```
 
 ### `gate.py`
@@ -128,9 +132,11 @@ tier that always complains is a tier nobody reads. Keys are matched by token, so
 two writers corrupt the file, and a subagent killed mid-write leaves JSON that
 cannot be resumed from.
 
+`--status-file` may appear before or after the subcommand; both orders parse.
+
 ```bash
 state.py --status-file S init
-state.py --status-file S show [--path layers.model]
+state.py show --status-file S [--path layers.model]
 state.py --status-file S set --path layers.model.status --value done
 state.py --status-file S add-finding --json '{"layer":"service","file":"X.java","tier":"T2","severity":"blocker",...}'
 state.py --status-file S fold-journal --journal .migration/journal/service-dev.ndjson --layer service

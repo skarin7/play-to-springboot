@@ -65,9 +65,9 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from routes import normalize_path, parse_play_routes
+    from routes import normalize_path, out_of_scope_reason, parse_play_routes
 except ImportError:
-    from .routes import normalize_path, parse_play_routes
+    from .routes import normalize_path, out_of_scope_reason, parse_play_routes
 
 DEFAULT_TIMEOUT = 15
 
@@ -106,6 +106,11 @@ def build_probes(routes_file: Path, include_parameterised: bool = False) -> dict
     needs a sample value or a request body that only a human or the architect
     can supply. Parameterised routes are emitted as disabled entries with a
     ``path_params`` stub so filling them in is an edit, not a rewrite.
+
+    Out-of-scope routes -- Play's built-in asset controllers and Twirl view
+    handlers -- are seeded disabled with the reason attached, and stay disabled
+    even under ``--include-parameterised``. Nothing was migrated behind them, so
+    a probe there manufactures a blocker against a page that was never in scope.
     """
     routes, notes = parse_play_routes(routes_file)
     probes: list[dict[str, Any]] = []
@@ -113,17 +118,21 @@ def build_probes(routes_file: Path, include_parameterised: bool = False) -> dict
         normalized = normalize_path(route.path)
         parameterised = "{}" in normalized or "**" in normalized
         mutating = route.verb not in ("GET", "HEAD")
-        enabled = not parameterised and not mutating
+        out_of_scope = out_of_scope_reason(route)
+        enabled = not parameterised and not mutating and not out_of_scope
         probe: dict[str, Any] = {
             "name": f"{route.verb} {route.path}",
             "verb": route.verb,
             "path": route.path,
-            "enabled": enabled or include_parameterised,
+            "enabled": False if out_of_scope else (enabled or include_parameterised),
         }
-        if parameterised:
+        if out_of_scope:
+            probe["out_of_scope"] = out_of_scope
+            probe["note"] = f"out of scope, not migrated: {out_of_scope}"
+        if parameterised and not out_of_scope:
             probe["path_params"] = {}
             probe["note"] = "fill path_params with sample values, then enable"
-        if mutating:
+        if mutating and not out_of_scope:
             probe["note"] = (
                 "mutating verb: supply a body and point both apps at disposable "
                 "state before enabling"

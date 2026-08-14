@@ -248,8 +248,10 @@ flowchart LR
 [PNG](flow-4-write-ownership.png)
 
 - **Only dev writes source**, and only into the Spring tree. Enforced by tool
-  grants in this plugin's `agents/` directory; backstopped by the `git status`
-  guard on the Play repo after every dispatch.
+  grants in this plugin's `agents/` directory; prevented up front by the
+  plugin's `PreToolUse` hook, which denies Play-repo writes; and backstopped by
+  `guard.py`, which the gate runs before every tier and which reports
+  `clean` / `tampered` / `error` rather than inferring cleanliness from silence.
 - **Only the manager writes state.** Two writers corrupt the file, and a subagent
   killed mid-write leaves JSON that cannot be resumed from.
 - **Dev's journal is append-only.** A subagent's context dies with it; the

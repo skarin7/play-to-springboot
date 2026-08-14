@@ -108,3 +108,18 @@ of layer, because everything depends on them.
 The "open questions" section is not optional. Anything you could not resolve
 belongs there, where the architect and the human will see it at Gate 1 — not
 buried in prose or quietly assumed away.
+
+## Record what this kit did not anticipate
+
+An open question is for the architect. A **gap** is for the plugin's author:
+this kit had no rule for something you found. Append one line per gap to
+`.migration/gaps.jsonl`:
+
+```json
+{"kind":"layout_surprise","subject":"app/web/","role":"researcher",
+ "what_i_did":"treated it as the controller directory; classifier called it 'other'"}
+```
+
+`kind` is one of `layout_surprise`, `unmapped_dependency`, `unhandled_idiom`.
+Use framework symbols and directory *shapes* in `subject`, not the repo's class
+names. See [docs/GAPS.md](../docs/GAPS.md).

@@ -64,23 +64,67 @@ that is a gap the human should see, not one to paper over.
 
 ### 2. Capture both sides
 
-Boot Play first, capture, stop it; then Spring.
+Never launch an application yourself. `boot.py` owns starting and stopping,
+because a backgrounded `sbt run &` leaves an sbt/JVM tree nothing can kill —
+which is what hung a previous run's editor long after the migration finished.
+
+**Preflight first. Do not use Docker. Do not pull images. A missing toolchain
+is the finding, not a problem to route around.**
+
+```bash
+RUN=<spring-repo>/.migration/run
+
+# 0. Can this even work?
+python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/boot.py" preflight --app play --repo <play-repo>
+```
+
+Exit 3 means blocked — read `problems`, emit **one** finding with
+`"category": "t5-skipped"` and the reason, and stop. No sbt means no Play
+capture; that is a gap for the human to see, not a puzzle to solve.
+
+Boot Play first, capture, stop it, then Spring:
 
 ```bash
 # Play
-(cd <play-repo> && sbt run &)          # or: sbt -Dhttp.port=9000 run
+python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/boot.py" start --app play --repo <play-repo> \
+    --port 9000 --run-dir "$RUN" --wait-path / --wait-timeout 180
 python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/endpoint_diff.py" capture --base-url http://localhost:9000 \
-    --probes .migration/endpoint-probes.json --out .migration/responses-play.json
+    --probes .migration/endpoint-probes.json --out .migration/responses-play.json \
+    --wait-path / --wait-attempts 60 --wait-delay 2.0
+python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/boot.py" stop --app play --run-dir "$RUN"
 
 # Spring
-(cd <spring-repo> && mvn spring-boot:run &)
+python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/boot.py" start --app spring --repo <spring-repo> \
+    --port 8080 --run-dir "$RUN" --wait-path / --wait-timeout 180
 python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/endpoint_diff.py" capture --base-url http://localhost:8080 \
-    --probes .migration/endpoint-probes.json --out .migration/responses-spring.json
+    --probes .migration/endpoint-probes.json --out .migration/responses-spring.json \
+    --wait-path / --wait-attempts 60 --wait-delay 2.0
+python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/boot.py" stop --app spring --run-dir "$RUN"
 ```
 
-`capture` polls `--wait-path` until the app answers, so it will not race a slow
-first boot. If nothing answers, say the app did not boot — that is the finding.
-Do not substitute a capture from a previous run.
+Run every `boot.py start` with the Bash tool's `timeout` at **300000** — longer
+than the wait budget, so the tool's own timeout is what reports a failed boot,
+with a log, rather than the harness killing the call.
+
+If `start` returns `"status": "not_answering"`, read the log path it printed and
+say the app did not boot. That is the finding. Do not retry blindly, and never
+substitute a capture from a previous run.
+
+**One fallback rung exists**, and only one: re-run `start` with `--fallback`
+(Play: `sbt -Dhttp.port=N run`; Spring: `mvn package` then `java -jar`). If that
+also fails, report it.
+
+### Always stop what you started
+
+```bash
+python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/boot.py" stop-all --run-dir "$RUN"
+python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/boot.py" status   --run-dir "$RUN"   # expect: count 0
+```
+
+Run `stop-all` **before you report back, whatever happened** — success, failure,
+or a diff you could not finish. Include the `status` count in your summary. The
+manager runs `stop-all` again after you return; that is a backstop for the case
+where you were killed mid-task, not permission to skip it.
 
 ### 3. Diff and rule
 
@@ -157,13 +201,32 @@ produces a vague fix.
 controller symptom with a model cause, and filing it against the controller sends
 dev to the wrong file.
 
+## Record what no tier could check
+
+You are the role best placed to see the kit's blind spots, because you are the
+one who keeps meeting them. When a tier could not judge something, or a tool
+could not run, append a line to `.migration/gaps.jsonl`:
+
+```json
+{"kind":"tier_blind_spot","subject":"play.mvc.Http.Context","role":"qa",
+ "what_i_did":"ruled benign; no tier can verify request-scoped state","blind_tier":"T5"}
+{"kind":"boot_failure","subject":"sbt","role":"qa",
+ "what_i_did":"sbt not on PATH; reported t5-skipped"}
+```
+
+That is separate from the finding you also emit. The finding is about this
+migration; the gap is about this kit lacking a check, and it is still true after
+the finding is fixed. See [docs/GAPS.md](../docs/GAPS.md).
+
 ## Report back
 
 ```
 Task:      T5 | ruling on <agent_reason>
 Endpoints: N probed, M passed, K findings
 Not probed: <routes you could not reach, and why>
+Out of scope: <probes disabled as out_of_scope — assets, views>
 Rulings:   <differences you judged benign, with the reason>
+Teardown:  boot.py status -> N running (expect 0)
 Findings:  <list>
 ```
 

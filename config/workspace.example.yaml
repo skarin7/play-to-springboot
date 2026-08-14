@@ -7,3 +7,14 @@ spring_repo: /path/to/spring-<basename>
 migration_root: /path/to/workspace-dir
 batch_size: 25
 base_package: com.example.application
+
+# Timeouts. Every one of these bounds something that shells out; the values are
+# the tool defaults, repeated here so they are visible and adjustable rather
+# than buried in a constant. Keys not in tools/workspace.py's allowlist are
+# ignored, so a typo here is silently no configuration at all.
+mvn_timeout: 900           # seconds; gate.py mvn compile / test
+java_timeout: 300          # seconds; gate.py dev-toolkit signature extraction
+dev_bash_timeout_ms: 900000  # milliseconds; the Bash timeout dev sets for mvn.
+                             # Claude Code's default is 120000, which kills a
+                             # cold-cache build and hands the agent a truncated log.
+boot_timeout: 180          # seconds; boot.py wait-for-ready budget per app

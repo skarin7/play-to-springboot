@@ -132,8 +132,15 @@ as not-yet-migrated, not a finding — gating mid-layer is safe by construction.
 
 ### 5d. Play-repo guard
 
-Every dispatch cycle: `git -C <play> status --porcelain`. Non-empty means dev
-touched Play source — a hard halt (see 5f), not a per-layer failure.
+`gate.py` runs `guard.py check` before T1 on every gate, and the manager can run
+it directly between dispatches. It reports `clean` | `tampered` | `error`
+(exit 0 / 2 / 3); anything but `clean` short-circuits the gate to
+`"status": "halt"` with exit 4 — a hard halt (see 5f), not a per-layer failure.
+
+`error` halts too. The predecessor of this check was `git status --porcelain`
+with "non-empty means tampered", which passed silently forever on a Play repo
+that was not a git repository: git exits 128 with empty stdout. Empty is not
+evidence; only `clean` is.
 
 There is no per-layer human review gate any more. Layer `model` finishing used
 to stop the run for a review before the idiom repeated across every later
@@ -155,7 +162,8 @@ escalation file afterward, via the chat summary or `report.html`.
 Two conditions still stop the whole run, because they mean the tool's
 invariant broke rather than a migration attempt failing:
 
-- the Play-repo guard (5d) trips — dev wrote to read-only source
+- the Play-repo guard (5d) returns anything but `clean` — `tampered` (dev wrote
+  to read-only source) or `error` (the guard could not run)
 - dev reports it cannot proceed without changing the Play repo
 
 Neither writes an escalation file to read later; both need a human's

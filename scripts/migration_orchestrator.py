@@ -38,6 +38,11 @@ TOOLS = Path(__file__).resolve().parent / "tools"
 sys.path.insert(0, str(TOOLS))
 
 from state import read_status  # noqa: E402
+from workspace import parse_workspace_yaml  # noqa: E402
+
+# Nothing here is interactive, so nothing here should be able to hang a session.
+SETUP_TIMEOUT = 600
+TOOL_TIMEOUT = 300
 
 
 def scripts_dir() -> Path:
@@ -53,29 +58,14 @@ def abs_path(p: Path) -> Path:
     return p.expanduser().resolve(strict=False)
 
 
-def parse_workspace_yaml(yaml_path: Path) -> dict[str, str]:
-    """Minimal key: value reader for the kit-generated workspace.yaml (no PyYAML)."""
-    out: dict[str, str] = {}
-    if not yaml_path.is_file():
-        return out
-    for line in yaml_path.read_text(encoding="utf-8").splitlines():
-        s = line.strip()
-        if not s or s.startswith("#") or ":" not in s:
-            continue
-        key, _, val = s.partition(":")
-        key = key.strip()
-        val = val.split("#", 1)[0].strip().strip('"').strip("'")
-        if key in ("play_repo", "spring_repo", "migration_root", "batch_size",
-                   "base_package", "kit_path"):
-            out[key] = val
-    return out
-
-
 def resolve_spring_repo(play_repo: Path, workspace_dir: Path,
                         spring_name: str | None) -> Path:
+    # The reader (and its key allowlist) lives in tools/workspace.py so there is
+    # exactly one place a new setting has to be registered. An unknown key is
+    # dropped, so a knob added in one file and not the other does nothing.
     ws = parse_workspace_yaml(workspace_dir / "workspace.yaml")
     if ws.get("spring_repo"):
-        spr = Path(ws["spring_repo"]).expanduser()
+        spr = Path(str(ws["spring_repo"])).expanduser()
         return spr.resolve() if spr.is_absolute() else (workspace_dir / spr).resolve()
     if spring_name:
         return (workspace_dir / spring_name).resolve()
@@ -86,7 +76,11 @@ def run_tool(name: str, args: list[str]) -> int:
     """Run a helper from scripts/tools and stream its output through."""
     cmd = [sys.executable, str(TOOLS / name), *args]
     print(f"$ {' '.join(shlex.quote(c) for c in cmd)}", file=sys.stderr)
-    return subprocess.run(cmd).returncode
+    try:
+        return subprocess.run(cmd, timeout=TOOL_TIMEOUT).returncode
+    except subprocess.TimeoutExpired:
+        print(f"ERROR: {name} exceeded {TOOL_TIMEOUT}s", file=sys.stderr)
+        return 1
 
 
 def cmd_setup(args) -> int:
@@ -99,7 +93,11 @@ def cmd_setup(args) -> int:
     cmd = ["bash", str(setup_sh), str(play_repo), "--workspace", str(workspace)]
     if args.spring_name:
         cmd += ["--spring-name", args.spring_name]
-    return subprocess.run(cmd, cwd=str(kit_root())).returncode
+    try:
+        return subprocess.run(cmd, cwd=str(kit_root()), timeout=SETUP_TIMEOUT).returncode
+    except subprocess.TimeoutExpired:
+        print(f"ERROR: setup.sh exceeded {SETUP_TIMEOUT}s", file=sys.stderr)
+        return 1
 
 
 def cmd_status(args) -> int:
