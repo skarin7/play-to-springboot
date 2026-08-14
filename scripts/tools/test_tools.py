@@ -241,6 +241,122 @@ class TestState(unittest.TestCase):
             self.assertEqual(s["layers"]["model"]["files_failed"], ["Odd.java"])
             self.assertEqual(s["layers"]["model"]["last_error_count"], 2)
 
+    def test_refolding_the_same_journal_counts_nothing_twice(self):
+        # The manager folds after every batch and every re-dispatch, against one
+        # append-only journal per layer. Before offsets were tracked this turned
+        # three migrated files into nine.
+        with tempfile.TemporaryDirectory() as d:
+            journal = Path(d) / "controller-dev.ndjson"
+            journal.write_text(
+                json.dumps({"action": "migrated", "count": 3}) + "\n"
+                + json.dumps({"action": "compiled", "error_count": 4}) + "\n",
+                encoding="utf-8",
+            )
+            s = state.merge_status({})
+            self.assertEqual(state.fold_journal(s, journal, "controller"), 2)
+            self.assertEqual(state.fold_journal(s, journal, "controller"), 0)
+            self.assertEqual(state.fold_journal(s, journal, "controller"), 0)
+            self.assertEqual(s["layers"]["controller"]["files_migrated"], 3)
+            self.assertEqual(s["layers"]["controller"]["validate_iteration"], 1)
+
+    def test_refold_picks_up_only_lines_appended_since(self):
+        with tempfile.TemporaryDirectory() as d:
+            journal = Path(d) / "service-dev.ndjson"
+            journal.write_text(
+                json.dumps({"action": "migrated", "count": 2}) + "\n", encoding="utf-8"
+            )
+            s = state.merge_status({})
+            state.fold_journal(s, journal, "service")
+            with journal.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"action": "migrated", "count": 5, "remaining": 0}) + "\n")
+            self.assertEqual(state.fold_journal(s, journal, "service"), 1)
+            self.assertEqual(s["layers"]["service"]["files_migrated"], 7)
+            self.assertEqual(s["layers"]["service"]["remaining_files"], 0)
+
+    def test_completed_trailing_line_is_folded_on_the_next_pass(self):
+        # A killed writer leaves a half line; the next append lands on that same
+        # line. The offset must stop short of it so it is read once it parses.
+        with tempfile.TemporaryDirectory() as d:
+            journal = Path(d) / "model-dev.ndjson"
+            journal.write_text(
+                json.dumps({"action": "migrated", "count": 1}) + "\n"
+                + '{"action": "migrated", "cou',
+                encoding="utf-8",
+            )
+            s = state.merge_status({})
+            self.assertEqual(state.fold_journal(s, journal, "model"), 1)
+            with journal.open("a", encoding="utf-8") as fh:
+                fh.write('nt": 4}\n')
+            self.assertEqual(state.fold_journal(s, journal, "model"), 1)
+            self.assertEqual(s["layers"]["model"]["files_migrated"], 5)
+
+    def test_truncated_journal_replays_from_the_top(self):
+        with tempfile.TemporaryDirectory() as d:
+            journal = Path(d) / "other-dev.ndjson"
+            journal.write_text(
+                "\n".join(json.dumps({"action": "migrated", "count": 1}) for _ in range(4))
+                + "\n",
+                encoding="utf-8",
+            )
+            s = state.merge_status({})
+            state.fold_journal(s, journal, "other")
+            self.assertEqual(s["layers"]["other"]["files_migrated"], 4)
+            journal.write_text(
+                json.dumps({"action": "migrated", "count": 1}) + "\n", encoding="utf-8"
+            )
+            self.assertEqual(state.fold_journal(s, journal, "other"), 1)
+
+
+class TestAttempts(unittest.TestCase):
+    TOOL = Path(__file__).resolve().parent / "state.py"
+
+    def _run(self, status_path: Path, *argv: str) -> str:
+        cmd = [sys.executable, str(self.TOOL), "--status-file", str(status_path)]
+        p = subprocess.run(cmd + list(argv), capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p.stdout.strip()
+
+    def test_bump_attempt_increments_and_reset_zeroes(self):
+        with tempfile.TemporaryDirectory() as d:
+            sp = Path(d) / "migration_status.json"
+            self._run(sp, "init")
+            self.assertEqual(self._run(sp, "bump-attempt", "--layer", "controller"), "1")
+            self.assertEqual(self._run(sp, "bump-attempt", "--layer", "controller"), "2")
+            self.assertEqual(self._run(sp, "bump-attempt", "--layer", "controller"), "3")
+            status = json.loads(sp.read_text(encoding="utf-8"))
+            # Escalation reads this; before the subcommand existed it stayed 0.
+            self.assertEqual(status["attempts"]["controller"]["count"], 3)
+            self.assertEqual(status["attempts"]["service"]["count"], 0)
+            self.assertEqual(
+                self._run(sp, "bump-attempt", "--layer", "controller", "--reset"), "0"
+            )
+
+    def test_bump_attempt_keeps_only_the_last_three_signature_sets(self):
+        with tempfile.TemporaryDirectory() as d:
+            sp = Path(d) / "migration_status.json"
+            self._run(sp, "init")
+            for n in range(5):
+                self._run(
+                    sp, "bump-attempt", "--layer", "service",
+                    "--signatures", json.dumps([f"sig-{n}"]),
+                )
+            sigs = json.loads(sp.read_text(encoding="utf-8"))["attempts"]["service"][
+                "error_signatures"
+            ]
+            self.assertEqual(sigs, [["sig-2"], ["sig-3"], ["sig-4"]])
+
+    def test_bump_attempt_rejects_an_unknown_layer(self):
+        with tempfile.TemporaryDirectory() as d:
+            sp = Path(d) / "migration_status.json"
+            self._run(sp, "init")
+            p = subprocess.run(
+                [sys.executable, str(self.TOOL), "--status-file", str(sp),
+                 "bump-attempt", "--layer", "nosuch"],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(p.returncode, 1)
+            self.assertIn("no such layer", p.stderr)
+
 
 class TestVerify(unittest.TestCase):
     def test_missing_layer_fails(self):

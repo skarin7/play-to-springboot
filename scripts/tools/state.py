@@ -124,6 +124,10 @@ def merge_status(raw: dict[str, Any]) -> dict[str, Any]:
         entry.setdefault("last_findings", [])
         attempts[layer] = entry
 
+    # How far each dev journal has been folded, keyed by file name. Without it
+    # every re-fold of an append-only journal counts the same lines again.
+    out.setdefault("journal_offsets", {})
+
     out.setdefault("source_inventory", None)
     out.setdefault("migration_verification", None)
 
@@ -205,19 +209,43 @@ def fold_journal(status: dict[str, Any], journal: Path, layer: str | None) -> in
     right file instead of losing everything the dead context held. Malformed
     trailing lines (the usual signature of a process killed mid-write) are
     skipped rather than aborting the fold.
+
+    Folding is idempotent. The journal is append-only and one file covers a whole
+    layer, but the manager folds after *every* batch and every re-dispatch, so a
+    plain replay re-adds every line it already counted -- a three-file layer
+    re-dispatched twice reported nine files migrated. ``journal_offsets`` records
+    how far each journal has been consumed and the next fold starts there.
     """
     if not journal.is_file():
         return 0
+    lines = journal.read_text(encoding="utf-8").splitlines()
+    offsets = status.setdefault("journal_offsets", {})
+    key = journal.name
+    start = int(offsets.get(key, 0))
+    if start > len(lines):
+        # The journal shrank, so it is not the file we measured -- a fresh run
+        # reusing the name, or one truncated by hand. Replay it from the top
+        # rather than trusting an offset into a file that no longer exists.
+        start = 0
     folded = 0
-    for line in journal.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
+    consumed = start
+    for i in range(start, len(lines)):
+        line = lines[i].strip()
         if not line:
+            consumed = i + 1
             continue
         try:
             entry = json.loads(line)
         except json.JSONDecodeError:
             print(f"[warn] skipping malformed journal line: {line[:80]}", file=sys.stderr)
+            if i == len(lines) - 1:
+                # A half-written trailing line is the signature of a killed
+                # writer, and the next append lands on the same line. Leave the
+                # offset short of it so it is re-read once it is complete.
+                break
+            consumed = i + 1
             continue
+        consumed = i + 1
         target = entry.get("layer") or layer
         if not target or target not in status["layers"]:
             continue
@@ -238,6 +266,7 @@ def fold_journal(status: dict[str, Any], journal: Path, layer: str | None) -> in
             le["validate_iteration"] = int(le.get("validate_iteration", 0)) + 1
             le["last_error_count"] = entry.get("error_count")
         folded += 1
+    offsets[key] = consumed
     return folded
 
 
@@ -292,6 +321,42 @@ def cmd_gate(args, status_path: Path) -> int:
     status = read_status(status_path)
     status["gates"][args.name] = {"human": args.value, "at": iso_now()}
     atomic_write_json(status_path, status)
+    return 0
+
+
+def cmd_bump_attempt(args, status_path: Path) -> int:
+    """
+    Count one failed dev attempt on a layer, or reset the count after a pass.
+
+    The escalation trigger is ``attempts.<layer>.count`` reaching 3, but nothing
+    used to move it: it stayed 0 for the whole run while a layer burned six gate
+    iterations, so the retry cap never fired and no layer ever reached
+    ``failed_layers``. Signature sets ride along because a stuck loop is
+    identified by repeats, not by the count alone.
+    """
+    status = read_status(status_path)
+    if args.layer not in status["layers"]:
+        print(f"ERROR: no such layer: {args.layer}", file=sys.stderr)
+        return 1
+    entry = status["attempts"].setdefault(
+        args.layer, {"count": 0, "error_signatures": [], "last_findings": []}
+    )
+    if args.reset:
+        entry["count"] = 0
+        entry["error_signatures"] = []
+        entry["last_findings"] = []
+    else:
+        entry["count"] = int(entry.get("count", 0)) + 1
+        if args.signatures:
+            sigs = entry.setdefault("error_signatures", [])
+            sigs.append(json.loads(args.signatures))
+            # Only the last three matter: the skill compares consecutive sets to
+            # tell a stuck loop from progress, and older ones just grow the file.
+            del sigs[:-3]
+        if args.findings:
+            entry["last_findings"] = json.loads(args.findings)
+    atomic_write_json(status_path, status)
+    print(entry["count"])
     return 0
 
 
@@ -369,6 +434,23 @@ def main() -> int:
     p_gate.add_argument("--name", required=True, help="e.g. architecture")
     p_gate.add_argument("--value", required=True, help="approved | revise")
 
+    p_bump = sub.add_parser(
+        "bump-attempt", parents=[common],
+        help="Count a failed dev attempt on a layer; prints the new count.",
+    )
+    p_bump.add_argument("--layer", required=True)
+    p_bump.add_argument(
+        "--reset", action="store_true",
+        help="Zero the count instead of incrementing, after a batch passes the gate.",
+    )
+    p_bump.add_argument(
+        "--signatures", default=None,
+        help="JSON array of this attempt's T1 error signatures. Last 3 sets kept.",
+    )
+    p_bump.add_argument(
+        "--findings", default=None, help="JSON array of finding ids from this attempt.",
+    )
+
     args = parser.parse_args()
     status_file = getattr(args, "status_file", None)
     if status_file is None:
@@ -382,6 +464,7 @@ def main() -> int:
         "add-finding": cmd_add_finding,
         "fold-journal": cmd_fold_journal,
         "gate": cmd_gate,
+        "bump-attempt": cmd_bump_attempt,
     }
     try:
         return handlers[args.cmd](args, status_path)

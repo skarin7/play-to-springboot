@@ -1,7 +1,7 @@
 {
   "name": "play-to-springboot",
   "description": "Migrate a Play Framework (Java) repo to Spring Boot using researcher/architect/dev/qa subagents coordinated through shared state, with a single upfront human gate.",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "author": {
     "name": "Shankar Karingula"
   },

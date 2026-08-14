@@ -86,7 +86,7 @@ single path).
 | `python3 "$CLAUDE_PLUGIN_ROOT/scripts/migration_orchestrator.py" setup --play-repo P` | Workspace scaffolding: Spring repo skeleton, `workspace.yaml`, `.migration/` |
 | `python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/fetch_jar.py"` | Fetch/checksum-verify/cache the dev-toolkit jar; prints its path |
 | `python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/inventory.py" --play-repo P [--spring-repo S]` | File counts per layer; picks `collapsed`/`full` mode |
-| `python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/state.py" --status-file S <sub>` | `init`, `show`, `set`, `add-finding`, `fold-journal`, `gate` — see **Exact invocations** below |
+| `python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/state.py" --status-file S <sub>` | `init`, `show`, `set`, `add-finding`, `fold-journal`, `gate`, `bump-attempt` — see **Exact invocations** below |
 | `python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/guard.py" check --play-repo P --spring-repo S` | Play-repo read-only guard; `clean`/`tampered`/`error` |
 | `python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/gate.py" --play-repo P --spring-repo S --layer L --jar J` | **The verification gate**: guard, then T1–T4 in one call |
 | `python3 "$CLAUDE_PLUGIN_ROOT/scripts/tools/verify.py" --play-repo P --spring-repo S --status-file S` | Completeness (counts + routes) |
@@ -117,6 +117,8 @@ state.py add-finding  --status-file S --json '{"layer":"service","file":"X.java"
                        "evidence":"...","suggested_fix":"..."}'
 state.py fold-journal --status-file S --journal .migration/journal/service-dev.ndjson --layer service
 state.py gate         --status-file S --name architecture --value approved
+state.py bump-attempt --status-file S --layer service [--signatures '["sig-a","sig-b"]']
+state.py bump-attempt --status-file S --layer service --reset   # after a batch passes
 
 # gate.py — guard runs first; exit 4 is a halt, not a failure
 gate.py --play-repo P --spring-repo S --layer init --tiers T1 --jar J
@@ -318,14 +320,19 @@ While `layers.<layer>.remaining_files` is null (not started) or greater than 0:
 4. Act on `status`:
    - `passed` → commit **this batch** (`layer(service): batch 3, 18 files,
      gate T1/T2 clean`), append `{"batch": N, "sha": "..."}` to
-     `commits.<layer>`, increment `batches_completed`, and reset
-     `attempts.<layer>.count` to 0 — the next batch starts with a fresh
-     3-attempt budget. If `remaining_files == 0`, set the layer `done` and
-     move to the next layer; otherwise loop back to step 1 for the next batch.
+     `commits.<layer>`, increment `batches_completed`, and reset the attempt
+     budget with `state.py bump-attempt --layer <layer> --reset` — the next
+     batch starts with a fresh 3-attempt budget. If `remaining_files == 0`,
+     set the layer `done` and move to the next layer; otherwise loop back to
+     step 1 for the next batch.
    - `failed` / `needs_review` with `needs_agent: false` → record the findings
-     with `add-finding` and re-dispatch dev **with the finding IDs attached**,
-     scoped to the same batch. The finding carries evidence; a bare error dump
-     does not.
+     with `add-finding`, count the attempt with
+     `state.py bump-attempt --layer <layer> --signatures '<tiers.T1.signatures>'`,
+     and re-dispatch dev **with the finding IDs attached**, scoped to the same
+     batch. The finding carries evidence; a bare error dump does not.
+     `bump-attempt` prints the new count: at **3**, stop re-dispatching this
+     layer and follow the escalation path in **Gate 3**. Nothing else moves
+     that counter, so skipping this call means the layer retries forever.
    - `needs_agent: true` → dispatch `qa` with `agent_reason` and the
      path to the gate output. See below.
 
@@ -440,9 +447,9 @@ trigger — `attempts.<layer>.count` reaching **3**, or any T2 blocker
 (`method-missing`) — still fires, and you still write
 `.migration/escalation-<layer>.md` with the batch index and file range, the
 open findings, the last three error signature sets, and what dev tried each
-time. But instead of stopping: record the layer in `failed_layers`, reset
-`attempts.<layer>.count`, and move on to the **next layer** in the dependency
-order. The escalation file is what a human reads afterward — via the chat
+time. But instead of stopping: record the layer in `failed_layers`, reset the
+counter with `state.py bump-attempt --layer <layer> --reset`, and move on to the
+**next layer** in the dependency order. The escalation file is what a human reads afterward — via the chat
 summary or `report.html` — to see what went wrong and why, not something they
 have to respond to in the moment.
 

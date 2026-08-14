@@ -75,6 +75,16 @@ Append-only, rather than the subagent updating a progress file, because appendin
 has no read-modify-write step to be interrupted halfway. A truncated final line
 is skipped; the completed lines before it are still good.
 
+Folding is idempotent. One journal covers a whole layer but the manager folds
+after *every* batch and every re-dispatch, so a plain replay counts the same
+lines again — a three-file controller layer re-dispatched twice reported nine
+files migrated and six compile iterations. `journal_offsets` records how many
+lines of each journal have been consumed, keyed by file name, and the next fold
+starts from there. Two edges it handles: a truncated *final* line leaves the
+offset short of itself, because the next append lands on that same line and
+completes it; and a journal shorter than its recorded offset is replayed from
+the top, since it cannot be the file that offset was measured against.
+
 Journal lines:
 
 ```json
@@ -177,6 +187,10 @@ keeps all its fields and gains the new ones. Legacy keys (`autonomous`,
                              "not_captured_after", "artifact": ".migration/endpoint-diff.json" },
 
   "attempts": { "<layer>": { "count", "error_signatures": [], "last_findings": [] } },
+                          // count moves only via state.py bump-attempt
+
+  "journal_offsets": { "<layer>-dev.ndjson": 12 },  // lines already folded, so a
+                                                    // re-fold does not recount them
 
   "gates": { "mode": "milestone | strict",  // legacy; unread now that only the
                                              // architecture gate blocks — see "Gates" below
@@ -251,6 +265,13 @@ still fires on any of:
 `attempts.<layer>.count` is scoped to the layer's **current batch**, not the
 whole layer — it resets to 0 every time a batch's gate passes. See "Batching a
 layer" below.
+
+The counter moves only through `state.py bump-attempt --layer <layer>`, called
+once per re-dispatch, and is zeroed by the same command with `--reset`. Nothing
+else writes it: while it was documented but unwritten the trigger never fired,
+and a controller layer ran six gate iterations with `count` still reading 0.
+`bump-attempt` prints the new count so the manager can compare it against 3
+without re-reading state.
 
 On trigger the manager writes `.migration/escalation-<layer>.md` — the batch
 index and file range, open findings, the last three error-signature sets, what

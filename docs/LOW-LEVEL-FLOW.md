@@ -115,7 +115,7 @@ output exists" check naturally leaves it alone when it later reaches the file's
 |---|---|
 | Action | re-verify T1 + T2 (T3 too once `layer == controller`) for this batch — dev's compile claim is not evidence |
 | Tool | `python3 scripts/tools/gate.py --layer <layer>` (runs `mvn compile` → `parse_mvn.py`, dev-toolkit `signature` → `signature_diff.py`, and `routes.py` at controller) |
-| Stored | `layers.<layer>` (incl. `remaining_files`), `qa_findings`, `attempts.<layer>` — via `state.py set` / `add-finding` |
+| Stored | `layers.<layer>` (incl. `remaining_files`), `qa_findings`, `attempts.<layer>` — via `state.py set` / `add-finding` / `bump-attempt` |
 | Subagent | none — manager runs the script itself |
 
 T2's `classes_absent_from_spring` treats files from batches not yet migrated
@@ -124,10 +124,13 @@ as not-yet-migrated, not a finding — gating mid-layer is safe by construction.
 ### 5c. Act on verdict
 
 - `passed` → `git commit` **this batch**, `{"batch": N, "sha": "..."}` appended
-  to `commits.<layer>`, `attempts.<layer>.count` reset to 0,
-  `batches_completed` incremented. If `remaining_files == 0`,
-  `layers.<layer>.status = done`; otherwise continue to 5g.
-- `failed` / `needs_review`, `needs_agent: false` → `add-finding`, re-dispatch **dev** for the same batch with finding IDs attached.
+  to `commits.<layer>`, `attempts.<layer>.count` reset to 0 via
+  `state.py bump-attempt --reset`, `batches_completed` incremented. If
+  `remaining_files == 0`, `layers.<layer>.status = done`; otherwise continue to 5g.
+- `failed` / `needs_review`, `needs_agent: false` → `add-finding`,
+  `state.py bump-attempt --layer <layer> --signatures <T1 signatures>`, re-dispatch
+  **dev** for the same batch with finding IDs attached. `bump-attempt` is the only
+  thing that moves the counter the escalation trigger reads.
 - `needs_agent: true` → dispatch **`qa`** with the gate output path and `agent_reason` (cross-layer error attribution, unparseable build tail, unparseable T2 file, or a tier returning `error`).
 
 ### 5d. Play-repo guard
