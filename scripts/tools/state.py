@@ -200,6 +200,37 @@ def next_finding_id(status: dict[str, Any]) -> str:
     return f"F-{n:03d}"
 
 
+def salvage_collided_line(line: str) -> dict[str, Any] | None:
+    """
+    Recover the trailing entry from a line two writes collided on.
+
+    A dev killed mid-append leaves a partial line with no newline of its own, so
+    the next dev's append lands on that same line:
+
+        {"layer":"service","action":"fail{"layer":"service","action":"migrated",...}
+
+    The torn prefix is gone for good, but the suffix is a whole entry, and
+    dropping the line loses a batch result that really happened -- counters then
+    drift *low*, which is worse than noisy because a short count reads as a
+    layer that still has work left.
+
+    Only a suffix that parses *and* carries an "action" is accepted, so a nested
+    object inside a single well-formed entry is never mistaken for a second one.
+    Scanning left to right takes the earliest such boundary, which is the real
+    one: anything earlier belongs to the torn prefix and cannot parse.
+    """
+    for i in range(1, len(line)):
+        if line[i] != "{":
+            continue
+        try:
+            entry = json.loads(line[i:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(entry, dict) and "action" in entry:
+            return entry
+    return None
+
+
 def fold_journal(status: dict[str, Any], journal: Path, layer: str | None) -> int:
     """
     Replay an append-only NDJSON journal into state.
@@ -237,14 +268,24 @@ def fold_journal(status: dict[str, Any], journal: Path, layer: str | None) -> in
         try:
             entry = json.loads(line)
         except json.JSONDecodeError:
-            print(f"[warn] skipping malformed journal line: {line[:80]}", file=sys.stderr)
-            if i == len(lines) - 1:
-                # A half-written trailing line is the signature of a killed
-                # writer, and the next append lands on the same line. Leave the
-                # offset short of it so it is re-read once it is complete.
-                break
-            consumed = i + 1
-            continue
+            entry = salvage_collided_line(line)
+            if entry is None:
+                print(
+                    f"[warn] skipping malformed journal line: {line[:80]}",
+                    file=sys.stderr,
+                )
+                if i == len(lines) - 1:
+                    # A half-written trailing line is the signature of a killed
+                    # writer. Leave the offset short of it so a later append that
+                    # makes the line readable is still folded.
+                    break
+                consumed = i + 1
+                continue
+            print(
+                f"[warn] recovered the trailing entry from a torn journal line: "
+                f"{line[:80]}",
+                file=sys.stderr,
+            )
         consumed = i + 1
         target = entry.get("layer") or layer
         if not target or target not in status["layers"]:

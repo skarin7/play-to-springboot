@@ -73,7 +73,19 @@ in (`state.py fold-journal`) and resumes at the right place.
 
 Append-only, rather than the subagent updating a progress file, because appending
 has no read-modify-write step to be interrupted halfway. A truncated final line
-is skipped; the completed lines before it are still good.
+is skipped; the completed lines before it are still good. That bounded damage is
+the whole reason for NDJSON over one JSON array — truncate an array mid-write and
+every entry in the file is unreadable, not just the last.
+
+**Torn lines.** A killed writer leaves a line with no terminator, so a plain
+append lands on that same line and welds two entries into something neither side
+can parse. Dev is told to *start* each append with a newline, which keeps the
+torn line isolated. Because that relies on an agent following an instruction, the
+reader does not depend on it: `salvage_collided_line` recovers the trailing entry
+from a welded line, accepting only a suffix that parses *and* carries an
+`action`, so a nested object inside one well-formed entry is never mistaken for a
+second entry. Without the salvage the counters drift *low* — a lost `migrated`
+line reads as a layer with work still left.
 
 Folding is idempotent. One journal covers a whole layer but the manager folds
 after *every* batch and every re-dispatch, so a plain replay counts the same

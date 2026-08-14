@@ -290,6 +290,48 @@ class TestState(unittest.TestCase):
             self.assertEqual(state.fold_journal(s, journal, "model"), 1)
             self.assertEqual(s["layers"]["model"]["files_migrated"], 5)
 
+    def test_a_torn_line_welded_to_the_next_append_keeps_the_whole_entry(self):
+        # A killed writer leaves no terminator, so the next dev's append lands on
+        # the same line. The prefix is unrecoverable; the suffix is a real batch
+        # result and dropping it drifts the counters low.
+        with tempfile.TemporaryDirectory() as d:
+            journal = Path(d) / "service-dev.ndjson"
+            journal.write_text(
+                '{"layer":"service","action":"migrated","count":3,"remaining":85}\n'
+                '{"layer":"service","action":"fail'
+                '{"layer":"service","action":"migrated","count":2,"remaining":83}\n',
+                encoding="utf-8",
+            )
+            s = state.merge_status({})
+            self.assertEqual(state.fold_journal(s, journal, "service"), 2)
+            self.assertEqual(s["layers"]["service"]["files_migrated"], 5)
+            self.assertEqual(s["layers"]["service"]["remaining_files"], 83)
+
+    def test_a_nested_object_is_not_mistaken_for_a_welded_entry(self):
+        # Salvage only accepts a suffix carrying "action", so an inner object in
+        # an otherwise unparseable line cannot be folded as if it were an entry.
+        self.assertIsNone(
+            state.salvage_collided_line('{"action":"migrated","meta":{"count":9}')
+        )
+        self.assertIsNone(state.salvage_collided_line('{"layer":"service","act'))
+
+    def test_a_leading_newline_keeps_the_torn_line_isolated(self):
+        # What dev.md now tells dev to write: the torn line stays on its own and
+        # the following entry parses without any salvage at all.
+        with tempfile.TemporaryDirectory() as d:
+            journal = Path(d) / "model-dev.ndjson"
+            journal.write_text(
+                '\n{"layer":"model","action":"migrated","count":3}\n'
+                '\n{"layer":"model","action":"fail',
+                encoding="utf-8",
+            )
+            s = state.merge_status({})
+            state.fold_journal(s, journal, "model")
+            with journal.open("a", encoding="utf-8") as fh:
+                fh.write('\n{"layer":"model","action":"migrated","count":2}\n')
+            self.assertEqual(state.fold_journal(s, journal, "model"), 1)
+            self.assertEqual(s["layers"]["model"]["files_migrated"], 5)
+
     def test_truncated_journal_replays_from_the_top(self):
         with tempfile.TemporaryDirectory() as d:
             journal = Path(d) / "other-dev.ndjson"

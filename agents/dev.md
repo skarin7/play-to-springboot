@@ -92,6 +92,17 @@ batch of the same layer.
 Append only — never rewrite the file. If you are killed mid-layer, this journal
 is what lets the manager resume at the right place instead of starting over.
 
+**Start each append with a newline, not only end with one.** A dev killed
+mid-write leaves a line with no terminator, and a plain append lands on that
+same line and welds the two together into something neither side can parse —
+losing your entry as well as the dead one. A leading newline keeps the torn line
+isolated on its own. Blank lines cost nothing; the fold skips them.
+
+```bash
+printf '\n%s\n' '{"layer":"service","action":"migrated","count":3,"remaining":85}' \
+    >> .migration/journal/service-dev.ndjson
+```
+
 ## The dev-toolkit jar
 
 The dispatch brief hands you an absolute path to the dev-toolkit jar (fetched
