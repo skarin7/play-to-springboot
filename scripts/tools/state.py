@@ -46,6 +46,7 @@ def default_layer_entry() -> dict[str, Any]:
         "status": "pending",
         "files_migrated": 0,
         "files_failed": [],
+        "gap_skipped_files": [],
         "validate_iteration": 0,
         "last_error_count": None,
         "failure_reason": None,
@@ -95,6 +96,17 @@ def merge_status(raw: dict[str, Any]) -> dict[str, Any]:
     research.setdefault("status", "pending")
     research.setdefault("captured_at", None)
     research.setdefault("artifact", ".migration/research.md")  # collapsed mode overrides to decisions.md
+
+    # From `java -jar dev-toolkit inventory` (step 2), not the Python file
+    # counter above -- classifies every play.*/DI/actor touchpoint the source
+    # actually uses, so PARADIGM/UNKNOWN constructs are known before the
+    # architect decides rather than discovered mid-transform by dev.
+    api_surface = out.setdefault("api_surface", {})
+    api_surface.setdefault("known", None)
+    api_surface.setdefault("unknown", None)
+    api_surface.setdefault("paradigm", None)
+    api_surface.setdefault("coverage_percent", None)
+    api_surface.setdefault("gaps", [])
 
     arch = out.setdefault("architecture_review", {})
     arch.setdefault("status", "pending")  # pending | approved | revise
@@ -318,6 +330,20 @@ def fold_journal(status: dict[str, Any], journal: Path, layer: str | None) -> in
             f = entry.get("file")
             if f and f not in failed:
                 failed.append(f)
+        elif action == "skipped":
+            # migrate-app found a PARADIGM/UNKNOWN touchpoint and wrote no
+            # output file for it -- not a failure (nothing ran and errored),
+            # not a migration (nothing was produced). Left untracked, a layer
+            # with skips reports files_migrated + remaining == total and looks
+            # complete while classes are silently missing until T2 catches it.
+            skipped = le.setdefault("gap_skipped_files", [])
+            f = entry.get("file")
+            if f and not any(s.get("file") == f for s in skipped):
+                skipped.append({
+                    "file": f,
+                    "classification": entry.get("classification"),
+                    "construct": entry.get("construct"),
+                })
         elif action == "compiled":
             le["validate_iteration"] = int(le.get("validate_iteration", 0)) + 1
             le["last_error_count"] = entry.get("error_count")

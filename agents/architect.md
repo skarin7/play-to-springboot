@@ -103,6 +103,14 @@ decision: find a library, write an adapter, or drop the feature. Do not leave it
 implicit — that is the gap that becomes a stubbed-out method later, which QA's T2
 check will (rightly) flag as a blocker.
 
+The brief also carries `api_surface.gaps` — the toolkit's own coverage scan,
+every `play.*`/DI/actor touchpoint classified `UNKNOWN` or `PARADIGM` before
+you started. Check `docs/GAPS.md`'s promoted rules for each `UNKNOWN` entry
+first — it may already have a decided mapping from a prior migration. What is
+left over is not optional to leave silent: an unmapped dependency here is not
+a research miss, it is a construct the toolkit itself cannot transform, which
+means dev will hit it mid-layer with no rule to follow unless you decide now.
+
 **That rule covers code dependencies only.** Dependencies that exist to build
 things §0 puts out of scope — `sbt-twirl`, `play.twirl.api`, asset pipeline
 plugins — are dropped with the reason "out of scope", full stop. Do not find a
@@ -135,6 +143,12 @@ These are what dev consults when the transformer leaves something ambiguous:
 - **DI style.** Constructor injection throughout, including classes the
   transformer emits with `@Autowired` fields.
 - **Lifecycle.** Where `@PreDestroy`/`@PostConstruct` are needed.
+- **`PARADIGM` touchpoints from `api_surface.gaps`.** These have no Spring
+  structural equivalent by definition — there is nothing to map, only a choice
+  of replacement pattern (Akka `ActorSystem` → `@Async` + `CompletableFuture`,
+  a scheduled `@Component`, or dropped, depending on what the actor actually
+  did). Record the choice here, once, for the construct — not per file. Dev
+  applies it; it does not re-derive it per occurrence.
 
 ### 4. `no_migration` list
 

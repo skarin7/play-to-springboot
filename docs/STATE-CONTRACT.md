@@ -154,6 +154,10 @@ keeps all its fields and gains the new ones. Legacy keys (`autonomous`,
   "research": { "status", "captured_at", "artifact": ".migration/research.md" },
   // collapsed mode: artifact is ".migration/decisions.md" (its `## Survey` section) — no separate research.md is written
 
+  "api_surface": { "known", "unknown", "paradigm", "coverage_percent",
+                    "gaps": [{ "construct", "location", "classification" }] },
+  // from `java -jar dev-toolkit inventory` (step 2) -- non-KNOWN touchpoints, passed to the architect at Gate 1
+
   "architecture_review": {
     "status": "pending | approved | revise",
     "decisions": ".migration/decisions.md",

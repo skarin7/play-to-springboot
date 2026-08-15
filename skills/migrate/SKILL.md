@@ -209,6 +209,40 @@ so the architect can draft `.migration/layer-overrides.json`. When
 `warn_suppressed_reason` is set instead, the ratio was high but the sample was
 too small to mean anything — mention it, do not act on it.
 
+**Then run the toolkit's own coverage scan** — a second, different `inventory`:
+Python's counts files per layer; the jar's classifies every `play.*`/DI/actor
+*touchpoint* the source actually uses as `KNOWN` (a transform rule exists),
+`UNKNOWN` (no rule yet), or `PARADIGM` (no Spring structural equivalent —
+Akka today). This is what turns "the architect guesses what's ambiguous" into
+"the architect is handed the exact list before guessing":
+
+```bash
+java -jar "$DEV_TOOLKIT_JAR" inventory --source <play> --report .migration/api-surface.json
+```
+
+Record the counts and pass the PARADIGM/UNKNOWN touchpoints to the architect
+in the brief — construct and location only, not the full report:
+
+```bash
+python3 - <<'PY'
+import json
+r = json.load(open(".migration/api-surface.json"))
+gaps = [t for t in r["touchpoints"] if t["classification"] != "KNOWN"]
+print(json.dumps({"known": r["knownCount"], "unknown": r["unknownCount"],
+    "paradigm": r["paradigmCount"], "coverage_percent": r["coveragePercent"],
+    "gaps": [{"construct": t["construct"], "location": t["location"],
+        "classification": t["classification"]} for t in gaps]}))
+PY
+# then: state.py set --path api_surface --value '<the JSON printed above>'
+```
+
+A `PARADIGM` touchpoint is always an idiom decision (§3 in `architect.md`) —
+there is no Spring equivalent to map to, so the architect records how this
+migration handles it, not what it maps to. An `UNKNOWN` touchpoint may already
+be covered by a promoted gap rule (check `docs/GAPS.md`'s promoted rules first)
+or may need its own decision; either way it is now visible at Gate 1 instead of
+discovered mid-transform by dev, three steps into a layer.
+
 ### 3. Researcher — **full mode only**
 
 If `mode == "collapsed"`, **skip this step entirely** and go to step 4. Do not

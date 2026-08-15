@@ -84,12 +84,19 @@ Append one line per action to `.migration/journal/<layer>-dev.ndjson`:
 ```json
 {"layer":"service","action":"migrated","count":3,"remaining":85}
 {"layer":"service","action":"failed","file":"ContentService.java"}
+{"layer":"service","action":"skipped","file":"ActorPricer.java","classification":"PARADIGM","construct":"akka.actor.ActorSystem"}
 {"layer":"service","action":"compiled","error_count":7}
 ```
 
 `remaining` on a `"migrated"` line is the `R` the CLI reported for this batch
 — the manager reads it to decide whether to dispatch you again for the next
 batch of the same layer.
+
+`"skipped"` is not `"failed"`: nothing ran and errored, nothing was produced.
+It is how a gap-skipped file (§ Gap-skipped files above) survives past your own
+context — without it the layer shows `R == 0` and a clean compile while a class
+is simply missing, discovered only when T2 flags it as `method-missing` several
+steps later.
 
 Append only — never rewrite the file. If you are killed mid-layer, this journal
 is what lets the manager resume at the right place instead of starting over.
@@ -164,7 +171,8 @@ Run exactly **one** batch per dispatch — never loop this yourself to `R == 0`.
 and your working directory is not guaranteed to be the Play repo):
 
 ```bash
-java -jar "$DEV_TOOLKIT_JAR" migrate-app --source <play-repo> --layer <layer> --batch-size <N> --target <spring-repo>
+java -jar "$DEV_TOOLKIT_JAR" migrate-app --source <play-repo> --layer <layer> --batch-size <N> \
+    --target <spring-repo> --report .migration/reports/<layer>-migrate-app.json
 ```
 
 Set the Bash tool's `timeout` to **600000** for this call — the default 120000
@@ -182,6 +190,38 @@ scoped to one small batch instead of an entire layer — a 100-file layer stays
 gated and committed in slices, not as one pass. Exit 0 means the batch fully
 processed; exit 1 means some files in the batch failed — proceed to compile
 anyway, then handle the failures.
+
+### Gap-skipped files — always check the report, not just the summary line
+
+A file with a PARADIGM (no Spring structural equivalent, e.g. Akka) or UNKNOWN
+(no toolkit rule yet) touchpoint is not transformed at all — `migrate-app`
+writes no output file and instead adds a result entry whose `warnings` start
+with `SKIPPED `. That entry still counts toward **`N files`** in the summary
+line (it was processed, just not written), so a layer can print a clean `0
+errors` and still be missing classes. This is exactly the improvisation the
+gaps loop exists to catch after the fact — catch it now instead:
+
+```bash
+python3 -c '
+import json, re, sys
+report = json.load(open(".migration/reports/<layer>-migrate-app.json"))
+for r in report:
+    for w in r.get("warnings", []):
+        m = re.match(r"SKIPPED (\w+): (\S+) @", w)
+        if m:
+            print(json.dumps({"layer": "<layer>", "action": "skipped",
+                "file": r.get("input"), "classification": m.group(1),
+                "construct": m.group(2)}))
+' | while read -r line; do printf '\n%s\n' "$line" >> .migration/journal/<layer>-dev.ndjson; done
+```
+
+For each one: check `docs/GAPS.md` — if a rule already covers this construct
+(recorded from a prior gap), migrate it by hand per that rule and re-run
+`transform` on the single file. If not, leave it un-migrated, journal it as
+above, and record the gap yourself (§ Record what you had no rule for) so it
+does not repeat silently on the next repo. Do not hand-port a PARADIGM
+construct (Akka actors, etc.) as a workaround — that is an architect decision
+(`decisions.md` idioms), not yours to make mid-transform.
 
 Single file, for a retry or a targeted fix:
 
@@ -285,8 +325,10 @@ succeeds. See [docs/GAPS.md](../docs/GAPS.md).
 ## Report back
 
 Files touched, what changed and why, the compile result, **files remaining in
-the layer (`R` from `migrate-app`)**, anything unresolved, and any place you
-had to depart from `decisions.md` (with the reason).
+the layer (`R` from `migrate-app`)**, **gap-skipped files (file, classification,
+construct) if any** — these are not in `R` and the manager cannot see them
+without you saying so — anything unresolved, and any place you had to depart
+from `decisions.md` (with the reason).
 
 Report the compile result as you observed it — `clean`, or `N errors across M
 files` with the categories. The manager re-runs the gate regardless, so an
