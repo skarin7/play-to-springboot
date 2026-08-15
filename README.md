@@ -9,6 +9,13 @@ lives in skill documents rather than in orchestration code.
 
 ## Motivation
 
+Why move off Play at all: Spring Boot has a much bigger community and more
+support. Play's growth has stalled. Play was built for Scala first — its
+Java support is just a wrapper around that, so anything custom is harder to
+do than it should be. And AI coding tools like Cursor barely understand Play
+code — we tried wrapping it with Metals, but it never felt natural, and that
+alone has become a real blocker for team adoption.
+
 Migrations are always painful, and Play Framework (Java) to Spring Boot is a
 migration between fundamentally different philosophies, not just two Java
 web frameworks — folder structure, how a controller is even called, routes vs.
