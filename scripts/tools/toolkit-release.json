@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
-  "download_url": "https://github.com/skarin7/play-to-spring-boot-migration-agent/releases/download/toolkit-v1.0.0/dev-toolkit-1.0.0.jar",
-  "sha256": "c17f17db6435180a4c5a1f41f07546327f4584833740972127b2ddeaedb7ac8a"
+  "version": "1.0.1",
+  "download_url": "https://github.com/skarin7/play-to-spring-boot-migration-agent/releases/download/toolkit-v1.0.1/dev-toolkit-1.0.1.jar",
+  "sha256": "9a58b89e9275810d75aa4e00d502b78231fb51f9d5cc2e1b12319ec1834cec1e"
 }
