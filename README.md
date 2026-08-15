@@ -7,6 +7,55 @@ a single upfront human review gate.
 Deterministic work is done by tools; judgment is done by agents; sequencing
 lives in skill documents rather than in orchestration code.
 
+## Motivation
+
+Migrations are always painful, and Play Framework (Java) to Spring Boot is a
+migration between fundamentally different philosophies, not just two Java
+web frameworks — folder structure, how a controller is even called, routes vs.
+declarative annotation mapping.
+
+We first did this by hand on a small service. Most of it was mechanical:
+copying a Java skeleton across, fixing imports because the dependencies and
+their references differ between frameworks, reshaping the layout to match
+Spring's conventions. That part is exactly the kind of work you can run
+deterministically, with a tool, every time, the same way. A smaller slice
+isn't — it needs a judgment call from whatever's touching the code. Play's
+`ExecutionContext`, for example, has no one true Spring equivalent; a model
+can look at how it's used and pick the right thread-pool replacement, but you
+can't hand-write that mapping source-to-target ahead of time for every case.
+
+So: deterministic steps run as tools (layout creation, skeleton copy, the
+AST-driven transform), and the decisions that can't be pinned down ahead of
+time are left to an LLM. That split is the plugin — four subagents (researcher,
+architect, dev, qa) do the execution and judgment, each updating its own
+state; a manager (orchestrator) reads that state and drives what happens next.
+
+This is also the answer to "just prompt it: migrate this repo to Spring
+Boot." A lot of engineers assume that works. It doesn't survive contact with
+a real repo — one context window can't hold research, an architecture
+decision, hundreds of files of mechanical porting, and verification at once
+without losing track of what it already decided three files ago, and a
+single pass gives you no gate to catch a wrong dependency choice before it's
+baked into every layer. Splitting research, architecture, dev, and QA into
+separate passes with a written record between them is what makes a
+multi-hour, hundreds-of-file migration hold together instead of drifting.
+
+The manager also watches for loops — a dev agent retrying an unfixable import
+forever (an Akka actor system has no Spring equivalent, say) gets a hard
+retry limit, and the failure is written to the journal instead of spinning,
+so the manager can read it and move on.
+
+Roughly how a run goes: inventory the source repo, research it, have an
+architect turn that research into a plan you approve once, then dev migrates
+layer by layer (fail fast if a layer can't be fixed, rather than break
+everything built on top of it later), then QA verifies before/after. Only the
+manager can write the shared state file, so agents can't step on each other.
+Full breakdown of each step below, in "How it works."
+
+At the end, the plugin reports what migrated, how long it took, and roughly
+what it cost in tokens — plus any gaps it hit along the way, safe to share
+since business object names are obfuscated. See "Reporting gaps" below.
+
 ## How it works
 
 | Role | Writes code | Job |
@@ -56,34 +105,25 @@ writes what: **[docs/FLOW.md](docs/FLOW.md)**.
 
 ### Why dev-toolkit does the transform, not the agent
 
-The dev-toolkit jar is a real Java-AST tool: it parses Play source and
-emits Spring source by rule (`@Singleton` → `@Component`/`@Service`/
-`@RestController`, `Result` → `ResponseEntity<T>`, Guice field injection →
-constructor injection, package/import rewriting). The dev agent runs it rather
-than freehand-porting every file, for reasons distinct from "agents are
-fallible":
+A separate Java-AST tool (dev-toolkit) does the mechanical file-by-file port;
+the dev agent runs it rather than freehand-porting every file. Reasons,
+distinct from "agents are fallible":
 
-- **Reproducible.** Same Play file in, same Spring file out, every run,
-  independent of which model session touches it — and testable
-  (`scripts/tools/test_tools.py`) in a way free-form LLM output isn't.
-- **Independent of the check that grades it.** T2 (`signature_diff.py`) exists
-  to answer "did the logic survive." If the same model both wrote the
-  translation and were the only thing checking it, that check would be the
-  model grading its own homework. A separate deterministic tool doing the
-  mechanical part keeps the check meaningful.
-- **Cheap at the file counts this runs at.** Hundreds of files of pure
-  boilerplate substitution carry zero judgment — spending agent tokens on them
-  buys nothing.
-- **Consistent across a long run.** A model asked "migrate this file" a
-  hundred times over a multi-hour session can drift in style file to file. A
-  rule applied by code does not drift.
+- **Reproducible.** Same file in, same file out, every run — testable in a
+  way free-form LLM output isn't.
+- **Independent of the check that grades it.** If the same model both wrote
+  the translation and were the only thing checking it, that check would be
+  the model grading its own homework.
+- **Cheap at scale.** Hundreds of files of pure boilerplate substitution
+  carry zero judgment — spending agent tokens on them buys nothing.
+- **Consistent across a long run.** A model asked to migrate a file a hundred
+  times over a multi-hour session can drift in style file to file; a rule
+  applied by code does not.
 
-The agent is reserved for what a rule genuinely can't decide: fixing the
-compile errors the transform's output produces, porting logic the CLI can't
-handle (hand-rolled algorithms, the `F.Promise`/`CompletionStage` idiom
-choice), and QA's judgment calls (T5 endpoint diffing, cross-layer error
-attribution). Everything mechanical stays in the tool; everything that
-requires reading code and deciding stays with the model.
+The agent is reserved for what a rule genuinely can't decide: fixing compile
+errors the transform's output produces, porting logic the tool can't handle,
+and QA's judgment calls. Everything mechanical stays in the tool; everything
+that requires reading code and deciding stays with the model.
 
 ## Install
 
@@ -132,11 +172,8 @@ unattended.
 | `--max-dispatches N` | Stop and report after N subagent dispatches |
 | `--assets-policy skip\|require` | `require` demands real Spring mappings for Play's built-in asset routes |
 
-Flags are read once at launch, because a message sent while a **subagent** is
-running never reaches it — "skip T5" said mid-run is heard by nobody. To change
-scope during a run, write `<spring-repo>/.migration/run-control.json`
-(`{"skip_tiers":["T5"],"stop_after_layer":"controller","pause":false}`); the
-manager re-reads it at each loop boundary, which is when it has control.
+Flags are read once at launch. To change scope mid-run, see
+[docs/ORCHESTRATION.md](docs/ORCHESTRATION.md) for the run-control file.
 
 ### Permissions
 
@@ -191,48 +228,19 @@ and commit references.
 | **T4** tests | `mvn test` | final | `gate.py --final` |
 | **T5** endpoint responses | responses captured from both apps, diffed | final | **QA agent** |
 
-Two of these earn their place by catching what the others cannot.
+Two of these earn their place by catching what the others cannot: **T2**
+catches a file that compiles and keeps every method but had a body replaced
+with `return null`; **T5** catches everything structural checks are blind
+to, since it's the only tier that proves Play and Spring return the same
+thing rather than just that both build and answer at the right paths.
 
-**T2** catches the stub-out. A file can compile, keep every method, and still
-have had its body replaced with `return null` — file counting scores that as
-success. It reports exactly two things: a public method that disappeared, and a
-method body that collapsed to near-nothing. The narrowness is deliberate;
-migration legitimately rewrites bodies, and blocker-severity false positives
-teach the reviewer to wave findings through.
-
-**T5** catches everything structural checks are blind to. T1–T4 prove the code
-builds, kept its methods, and answers at the right paths. Only T5 proves it
-returns the same thing. Boot Play, capture per-route responses, boot Spring,
-capture, diff. Volatile values (timestamps, ids, durations) are compared for
-presence and type rather than equality; field ordering is never a difference.
-What remains is judgment, which is why T5 is the tier with an agent attached.
-
-Mutating verbs are seeded disabled — a POST needs a request body `conf/routes`
-does not record, and identical starting state in both apps. See
+Full rationale, including why each tier is scoped the way it is:
 [docs/ORCHESTRATION.md](docs/ORCHESTRATION.md#phase-4--endpoint-parity-t5).
 
-## Deterministic helpers
-
-Agents call these; so can you (from the plugin's own directory). All print
-JSON to stdout except `fetch_jar.py` and `report.py`, which print a path.
-
-| Tool | Purpose |
-|---|---|
-| `scripts/tools/gate.py` | **T1–T4 in one call**, with a single verdict and findings |
-| `scripts/tools/endpoint_diff.py` | T5: seed probes, capture responses, diff them |
-| `scripts/tools/inventory.py` | Per-layer file counts, both trees; picks role mode |
-| `scripts/tools/verify.py` | Completeness + T3 route parity |
-| `scripts/tools/signature_diff.py` | T2 structural preservation |
-| `scripts/tools/parse_mvn.py` | Maven log → structured errors |
-| `scripts/tools/state.py` | Atomic single-writer state access |
-| `scripts/tools/routes.py` | Play routes / Spring mappings extraction |
-| `scripts/tools/fetch_jar.py` | Downloads, checksum-verifies, and caches the dev-toolkit jar |
-| `scripts/tools/report.py` | Renders the self-contained `report.html` |
-| `scripts/tools/token_report.py` | Measured token and cost accounting per run |
-
-```bash
-python3 scripts/tools/test_tools.py    # 96 tests, stdlib only
-```
+The scripts behind these tiers (`gate.py`, `endpoint_diff.py`,
+`signature_diff.py`, etc.) live in `scripts/tools/` and are documented there;
+run `python3 scripts/tools/test_tools.py` to exercise them (96 tests, stdlib
+only).
 
 ## Layout
 
@@ -249,14 +257,10 @@ play-to-springboot/                     (plugin root)
 └── docs/{STATE-CONTRACT.md,ORCHESTRATION.md,PERMISSIONS.md,FLOW.md,...}
 
 workspace/                              (created per target Play repo)
-├── <play-repo>/                        # READ-ONLY during migration — never
-│                                        # written to; guard.py proves it
+├── <play-repo>/                        # READ-ONLY during migration
 ├── spring-<basename>/
 │   ├── migration-status.json           # single source of truth
-│   ├── .migration/                     # research.md, decisions.md, findings,
-│   │   ├── guard/                      # read-only baseline + last check
-│   │   ├── run/                        # T5 pidfiles and boot logs
-│   │                                   # journals, report.html
+│   ├── .migration/                     # research.md, decisions.md, journals, report.html
 │   └── src/main/java/
 ├── workspace.yaml
 └── route-map.json                      # populated from conf/routes
@@ -268,15 +272,12 @@ repo.
 
 ## State and resumability
 
-`migration-status.json` is written **only by the migrate skill**. Subagents
-report through artifacts under `.migration/` and through append-only
-journals, which is what lets a killed subagent be resumed rather than
-restarted.
-
-Re-running `/play-to-springboot:migrate` is always safe: completed layers are
-skipped, the transformer skips files that already exist in the target, and a
-layer already recorded in `failed_layers` is retried from scratch rather than
-silently re-skipped.
+Only the migrate skill writes `migration-status.json`; subagents report
+through artifacts and append-only journals under `.migration/`, which is what
+lets a killed subagent resume rather than restart. Re-running
+`/play-to-springboot:migrate` is always safe — completed work is skipped, and
+a layer recorded as failed is retried from scratch rather than silently
+re-skipped.
 
 Full schema, handoff rules, and gate semantics: **[docs/STATE-CONTRACT.md](docs/STATE-CONTRACT.md)**.
 
@@ -284,47 +285,35 @@ Full schema, handoff rules, and gate semantics: **[docs/STATE-CONTRACT.md](docs/
 
 Things this design does not, and mostly cannot, guarantee:
 
-- **Orchestration is prose, not code.** The per-layer/per-batch loop, gate
-  re-runs, `attempts.<layer>.count` resetting on batch advance, escalation
-  triggers — all of it lives in `skills/migrate/SKILL.md` as instructions an
-  agent follows, not an enforced state machine. A model that skips a step,
-  marks a layer `done` without actually gating its last batch, or forgets to
-  reset the attempts counter is not stopped by anything except your review at
-  Gate 1 or after the run — or `verify.py`'s completeness check catching the
-  shortfall late, at the final gate, rather than fail-fast where it happened.
-- **The single-writer rule for `migration-status.json` is a convention, not a
-  lock.** Only the migrate skill is supposed to write it; nothing at the
-  filesystem level stops a subagent's `Bash` grant from writing it directly
-  (see STATE-CONTRACT.md's "Bash can write" gap). Corruption from a second
-  writer is a misfollowed-skill risk, not just a crash risk.
+- **Orchestration is prose, not code.** The loop lives in the skill as
+  instructions an agent follows, not an enforced state machine. A model that
+  skips a step isn't stopped by anything except your review at Gate 1, or the
+  final gate catching the shortfall late.
+- **The single-writer rule for the status file is a convention, not a lock.**
+  Nothing at the filesystem level stops a subagent from writing it directly.
 - **T1–T4 are deterministic; the transform's edge cases and QA's judgment are
-  not.** Reserving agent work for logic-porting and T5 means real
-  non-determinism remains exactly where it was moved to on purpose — the same
-  endpoint diff can get a different judgment call session to session even
-  though the scripts around it can't.
+  not.** The same endpoint diff can get a different judgment call session to
+  session even though the scripts around it can't.
 - **T2 is narrow by design, which means real blind spots.** It catches a
-  missing method or a >60%-statement collapse, not "compiles, keeps every
+  missing method or a large statement collapse, not "compiles, keeps every
   statement, does something subtly different." An inverted condition or an
-  off-by-one passes T1–T4 clean; only T5 has a chance, and T5's mutating-verb
+  off-by-one passes T1–T4 clean; only T5 has a chance, and its mutating-verb
   coverage is GET-only by default.
-- **Views, static assets, and i18n bundles are not migrated at all.** Twirl
-  templates (`app/**/*.scala.html`), `public/**`, and `conf/messages*` are
-  counted into `out_of_scope` and left in the Play repo. Every tier here reads
-  `*.java`, so a hand-ported template would pass T1 and be invisible to T2, T3
-  and T5 — work no check in this kit can verify. The report says exactly what
-  was left behind; a migrated app that served HTML pages will not serve them.
-- **T2 exemptions can suppress a `blocker`.** Framework glue whose Spring
-  counterpart is a different interface (`Filter.apply` → `Filter.doFilter`) is
-  suppressed rather than reported, because reporting it made the cheapest fix a
-  fake method that satisfied a regex. Suppressions are listed in the gate output
-  and in the report, the architect authors them, and `gate.py` re-hashes the
-  file every run — but the mechanism is still a lever, and the report is where
-  you check it was not over-used.
+- **Views, static assets, and i18n bundles are not migrated at all.** Left in
+  the Play repo and out of scope for every check here — a migrated app that
+  served HTML pages will not serve them.
+- **T2 exemptions can suppress a blocker.** Framework glue whose Spring
+  counterpart is a genuinely different interface is suppressed rather than
+  reported, because reporting it made the cheapest fix a fake method that
+  satisfied a regex. Suppressions are listed in the report, so you can check
+  the mechanism wasn't over-used.
 - **A layer that keeps failing doesn't stop the run — you find out at the
-  end.** Dropping the per-layer review gate means a stuck layer runs to its
-  3-attempt limit and gets recorded in `failed_layers` rather than
-  interrupting you immediately; you read about it in the chat summary or
-  `report.html`, not in the moment it happened.
+  end.** It hits its retry limit, gets recorded as failed, and the run keeps
+  going; you read about it in the chat summary or the report, not in the
+  moment it happened.
+
+Full detail on each of these: [docs/STATE-CONTRACT.md](docs/STATE-CONTRACT.md),
+[docs/ORCHESTRATION.md](docs/ORCHESTRATION.md).
 
 ## Notes
 
