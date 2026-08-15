@@ -251,6 +251,21 @@ def exemptions_state(spring_repo: Path, approved_sha: str | None) -> dict[str, A
     }
 
 
+def journal_anomalies_state(status: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Report journal shrinks recorded by ``state.py fold-journal``.
+
+    A journal shorter than its last recorded offset is not blocked --
+    ``fold_journal`` already recovers by replaying from the top, because a
+    reused filename on a fresh run looks identical to a truncated one and the
+    manager must not stall on it. But the two are not the same event, and only
+    a human or QA can tell them apart, so every such shrink is carried here
+    into the gate the same way an exemptions-file edit is: reported and
+    escalated, never silent.
+    """
+    return list(status.get("journal_anomalies") or [])
+
+
 def tier_preservation(
     play_root: Path,
     spring_root: Path,
@@ -547,6 +562,7 @@ def main() -> int:
     no_migration: set[str] = set()
     done_layers: set[str] = set()
     approved_exemptions_sha: str | None = None
+    journal_anomalies: list[dict[str, Any]] = []
     status_file = args.status_file or (spring_repo / "migration-status.json")
     if status_file.is_file():
         try:
@@ -562,6 +578,7 @@ def main() -> int:
                 for name, entry in (state.get("layers") or {}).items()
                 if isinstance(entry, dict) and entry.get("status") == "done"
             }
+            journal_anomalies = journal_anomalies_state(state)
         except json.JSONDecodeError as e:
             print(f"[warn] could not read {status_file}: {e}", file=sys.stderr)
 
@@ -622,6 +639,17 @@ def main() -> int:
         tiers["T4"] = skipped("tests run at final only")
 
     reasons = escalation_reasons(tiers, findings, done_layers, layer, overrides)
+    if journal_anomalies:
+        # Not a halt -- fold_journal already recovered by replaying from the
+        # top -- but a journal shrinking is indistinguishable from tampering
+        # without a human or QA looking at it, so it is never silent.
+        for a in journal_anomalies:
+            reasons.append(
+                f"journal {a.get('journal')} shrank since last fold "
+                f"(expected at least {a.get('expected_at_least')} lines, found "
+                f"{a.get('found')}); replayed from the top -- confirm this is a "
+                "reused filename, not a truncated journal"
+            )
     if exemptions_info["modified_after_gate"]:
         # Not a halt -- the file may have been edited for a legitimate reason --
         # but never silent. A human approved a specific set; this one is
@@ -638,6 +666,7 @@ def main() -> int:
         "checked_at": iso_now(),
         "guard": guard or {"status": "skipped", "reason": "--skip-guard"},
         "exemptions": exemptions_info,
+        "journal_anomalies": journal_anomalies,
         "tiers_run": sorted(selected),
         "status": verdict(tiers, findings, guard),
         "tiers": {

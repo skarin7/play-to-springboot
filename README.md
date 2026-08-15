@@ -248,7 +248,7 @@ Full rationale, including why each tier is scoped the way it is:
 
 The scripts behind these tiers (`gate.py`, `endpoint_diff.py`,
 `signature_diff.py`, etc.) live in `scripts/tools/` and are documented there;
-run `python3 scripts/tools/test_tools.py` to exercise them (96 tests, stdlib
+run `python3 tests/test_tools.py` to exercise them (96 tests, stdlib
 only).
 
 ## Layout

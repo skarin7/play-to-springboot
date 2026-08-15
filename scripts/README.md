@@ -76,7 +76,7 @@ Each prints JSON to stdout and does one thing.
 | `workspace.py` | The one reader for `workspace.yaml`, and its key allowlist |
 
 ```bash
-python3 scripts/tools/test_tools.py     # stdlib only, no dependencies
+python3 tests/test_tools.py     # stdlib only, no dependencies
 ```
 
 ### `gate.py`

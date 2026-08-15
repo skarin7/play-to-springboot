@@ -65,6 +65,7 @@ def merge_status(raw: dict[str, Any]) -> dict[str, Any]:
     out = dict(raw)
     out.setdefault("current_step", "research")
     out.setdefault("mode", None)  # collapsed | full, chosen from inventory
+    out.setdefault("journal_anomalies", [])  # journal shrunk since last fold -- see fold_journal
 
     # Scope decided at launch, from the skill's arguments. Pre-declared because
     # a message sent mid-run reaches the manager but never a subagent already
@@ -284,6 +285,17 @@ def fold_journal(status: dict[str, Any], journal: Path, layer: str | None) -> in
         # The journal shrank, so it is not the file we measured -- a fresh run
         # reusing the name, or one truncated by hand. Replay it from the top
         # rather than trusting an offset into a file that no longer exists.
+        # Recovery proceeds either way, but a shrink is indistinguishable from
+        # tampering, so it is recorded for the gate to surface -- silent
+        # auto-recovery here is the same failure mode the exemptions sha-pin
+        # exists to avoid.
+        anomalies = status.setdefault("journal_anomalies", [])
+        anomalies.append({
+            "journal": key,
+            "expected_at_least": start,
+            "found": len(lines),
+            "detected_at": iso_now(),
+        })
         start = 0
     folded = 0
     consumed = start
