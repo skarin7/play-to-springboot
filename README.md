@@ -63,18 +63,20 @@ At the end, the plugin reports what migrated, how long it took, and roughly
 what it cost in tokens — plus any gaps it hit along the way, safe to share
 since business object names are obfuscated. See "Reporting gaps" below.
 
+![End-to-end flow](docs/flow-1-end-to-end.png)
+
 ## How it works
 
 | Role | Writes code | Job |
 |---|---|---|
-| **migrate** (main thread) | no | Owns state, sequences layers, dispatches subagents, enforces the gate, commits |
+| **orchestrator** (main thread, triggered by `/migrate`) | no | Owns state, sequences layers, dispatches subagents, enforces the gate, commits |
 | **researcher** | no | Surveys the Play repo before anything is built |
 | **architect** | no | Decides the dependency, config, and idiom mapping — before dev starts |
 | **dev** | **yes** | Runs the transformer, compiles, fixes compile errors. The only role that writes source |
 | **qa** | no | Verifies endpoint responses before and after; rules on results a script cannot judge. Never fixes |
 
 ```
-migrate → researcher → architect ──── GATE 1 (you approve the approach)
+orchestrator → researcher → architect ──── GATE 1 (you approve the approach)
                                         ↓
    dev writes pom/Application → gate.py compiles the EMPTY project (dependency check)
                                         ↓
@@ -298,22 +300,25 @@ Things this design does not, and mostly cannot, guarantee:
   final gate catching the shortfall late.
 - **The single-writer rule for the status file is a convention, not a lock.**
   Nothing at the filesystem level stops a subagent from writing it directly.
-- **T1–T4 are deterministic; the transform's edge cases and QA's judgment are
-  not.** The same endpoint diff can get a different judgment call session to
-  session even though the scripts around it can't.
-- **T2 is narrow by design, which means real blind spots.** It catches a
-  missing method or a large statement collapse, not "compiles, keeps every
-  statement, does something subtly different." An inverted condition or an
-  off-by-one passes T1–T4 clean; only T5 has a chance, and its mutating-verb
-  coverage is GET-only by default.
+- **The compile, structural, route, and test checks (T1–T4) are
+  deterministic; the transform's edge cases and QA's endpoint judgment
+  (T5) are not.** The same endpoint diff can get a different judgment call
+  session to session even though the scripts around it can't.
+- **The structural-preservation check (T2) is narrow by design, which means
+  real blind spots.** It catches a missing method or a large statement
+  collapse, not "compiles, keeps every statement, does something subtly
+  different." An inverted condition or an off-by-one passes every automated
+  check clean; only the endpoint-response check (T5) has a chance, and its
+  coverage of data-mutating requests (POST/PUT/DELETE) is off by default —
+  only GET requests are checked out of the box.
 - **Views, static assets, and i18n bundles are not migrated at all.** Left in
   the Play repo and out of scope for every check here — a migrated app that
   served HTML pages will not serve them.
-- **T2 exemptions can suppress a blocker.** Framework glue whose Spring
-  counterpart is a genuinely different interface is suppressed rather than
-  reported, because reporting it made the cheapest fix a fake method that
-  satisfied a regex. Suppressions are listed in the report, so you can check
-  the mechanism wasn't over-used.
+- **Structural-check (T2) exemptions can suppress a blocker.** Framework
+  glue whose Spring counterpart is a genuinely different interface is
+  suppressed rather than reported, because reporting it made the cheapest
+  fix a fake method that satisfied a regex. Suppressions are listed in the
+  report, so you can check the mechanism wasn't over-used.
 - **A layer that keeps failing doesn't stop the run — you find out at the
   end.** It hits its retry limit, gets recorded as failed, and the run keeps
   going; you read about it in the chat summary or the report, not in the
@@ -324,9 +329,6 @@ Full detail on each of these: [docs/STATE-CONTRACT.md](docs/STATE-CONTRACT.md),
 
 ## Notes
 
-- `scripts/migration_orchestrator.py` no longer orchestrates. It does workspace
-  setup and status reporting. Sequencing, model choice, and failure handling
-  belong to the agent now.
 - The dev-toolkit jar's provenance is a checksum, not a filename or an
   inspected marker class. `scripts/tools/toolkit-release.json` pins
   `{version, download_url, sha256}`; `fetch_jar.py` refuses to hand back
