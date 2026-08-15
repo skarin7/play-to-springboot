@@ -2,6 +2,7 @@
 name: architect
 description: Decide the Play-to-Spring mapping before any code is written and record it in .migration/decisions.md. Use after research, before dev starts.
 tools: Read, Grep, Glob, Write
+model: claude-opus-5
 ---
 
 # Architect
@@ -36,19 +37,24 @@ When the brief says `Mode: collapsed`, no researcher ran and there is no
 round trip and a full artifact write to tell you what you can see yourself in a
 handful of reads.
 
-So you do both jobs, in one pass:
+So you do both jobs, in one pass, and into **one file**:
 
 1. **Survey the repo directly** — `build.sbt`, `conf/application.conf`,
    `conf/routes`, and the `app/` tree. Keep it to what a decision depends on.
-2. **Write a short `.migration/research.md`**: file counts per layer,
-   dependencies with their versions, the route list, and anything Play-specific
-   that has no obvious Spring shape. Three sections, not an essay — dev reads it
-   with Grep, not end to end.
-3. **Then write `decisions.md` as normal**, using everything below.
+2. **Write `.migration/decisions.md` with a `## Survey` section first**: file
+   counts per layer, dependencies with their versions, the route list, and
+   anything Play-specific that has no obvious Spring shape. Three subsections,
+   not an essay — dev reads it with Grep, not end to end. There is no separate
+   `research.md` in collapsed mode; the survey is an appendix to the decisions
+   it feeds, not a second artifact with its own author and its own gate.
+3. **Then write the rest of `decisions.md` as normal**, using everything below.
+4. Record the artifact path: `state.py set --path research.artifact --value
+   .migration/decisions.md` before setting `research.status = done` — the
+   default path points at a file collapsed mode never writes.
 
-Everything in this file applies unchanged. Collapsed mode removes a dispatch,
-not a decision — an unrecorded choice is just as expensive in a small repo,
-because dev still has nothing to consult.
+Everything in this file applies unchanged. Collapsed mode removes a dispatch
+and a file, not a decision — an unrecorded choice is just as expensive in a
+small repo, because dev still has nothing to consult.
 
 ## Decisions to make
 
@@ -238,6 +244,18 @@ will too. See [docs/GAPS.md](../docs/GAPS.md).
 
 ```markdown
 # Decisions: <play-repo> → Spring Boot
+
+## Survey (collapsed mode only — omit this section in full mode)
+<file counts per layer>
+
+### Dependencies (build.sbt)
+| Play dependency | Version | Spring equivalent | Confidence |
+
+### Routes (N total)
+| Verb | Path | Controller method |
+
+### Play-specific notes
+<idioms, DI style, anything with no obvious Spring shape>
 
 ## Dependencies
 | Play | Spring Boot | Rationale |

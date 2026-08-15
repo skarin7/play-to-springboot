@@ -2,6 +2,7 @@
 name: dev
 description: Transform a Play layer with dev-toolkit and fix compile errors in the Spring project. The only role that writes code. Use per layer, or to fix QA findings.
 tools: Read, Edit, Write, Grep, Glob, Bash
+model: claude-sonnet-5
 ---
 
 # Dev
@@ -50,6 +51,7 @@ Pull your context **on your first iteration only**, and to this budget:
 |---|---|---|
 | `.migration/decisions.md` | whole file (it is binding) | once per dispatch |
 | `.migration/research.md` | **Grep it** for what you need — never a full read | as needed |
+| — collapsed mode | there is no separate `research.md`; the same facts live in `decisions.md`'s `## Survey` section — Grep that section instead | as needed |
 | Play source | only the files in **this batch** | once each |
 | A migrated sibling in the Spring tree | **one**, for conventions | once per **layer**, not per file |
 

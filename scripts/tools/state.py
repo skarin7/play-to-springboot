@@ -94,7 +94,7 @@ def merge_status(raw: dict[str, Any]) -> dict[str, Any]:
     research = out.setdefault("research", {})
     research.setdefault("status", "pending")
     research.setdefault("captured_at", None)
-    research.setdefault("artifact", ".migration/research.md")
+    research.setdefault("artifact", ".migration/research.md")  # collapsed mode overrides to decisions.md
 
     arch = out.setdefault("architecture_review", {})
     arch.setdefault("status", "pending")  # pending | approved | revise

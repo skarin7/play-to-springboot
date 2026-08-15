@@ -2,6 +2,7 @@
 name: qa
 description: Verify endpoint responses before and after migration (T5), and rule on gate results a script cannot judge. Never fixes code. Use when gate.py sets needs_agent, and at final for T5.
 tools: Read, Grep, Glob, Bash
+model: claude-opus-5
 ---
 
 # QA

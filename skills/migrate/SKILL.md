@@ -228,9 +228,14 @@ returns its dependency map, config map, idiom decisions, `no_migration` list,
 out-of-scope counts, and exemptions.
 
 **In collapsed mode, say so in the brief** — `Mode: collapsed. No research.md
-exists; read the repo yourself and write both artifacts.` The architect writes a
-short `research.md` (inventory, dependencies, routes) and then `decisions.md`.
-Set `research.status = done` from that same dispatch.
+exists; read the repo yourself and write decisions.md, with a Survey section at
+the top.` The architect writes **one file**: `decisions.md`, opening with a
+`## Survey` section (inventory, dependencies, routes) followed by the normal
+decisions sections — not a separate `research.md`. Full mode keeps two files
+because it has two authors; collapsed mode has one author for both, so one file
+is enough. Set `research.status = done` from that same dispatch, and point
+`research.artifact` at `decisions.md` (the architect records this — see its
+collapsed-mode instructions).
 
 Record `architecture_review.no_migration` and `architecture_review.exemptions`,
 then **stop and present the decisions to the human** — including the
@@ -545,6 +550,7 @@ Load the dev agent. Mode: transform. Layer: service.
 Batch size: 25 (one --batch-size pass only).
 Jar: /home/user/.claude/plugins/data/.../dev-toolkit-1.0.1.jar (from fetch_jar.py)
 Decisions: .migration/decisions.md   Research: .migration/research.md
+(Collapsed mode: no research.md — Survey section is inside decisions.md.)
 Play repo: /path/to/play (READ ONLY)  Spring repo: /path/to/spring
 Bash timeout: 900000 for mvn, 600000 for java -jar. Read your context once.
 Compile before you report back; the gate re-runs it either way.

@@ -2,6 +2,7 @@
 name: researcher
 description: Survey a Play repo before migration starts and write .migration/research.md. Use once, up front, before any code is generated.
 tools: Read, Grep, Glob, Bash
+model: claude-sonnet-5
 ---
 
 # Researcher
