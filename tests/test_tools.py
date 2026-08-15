@@ -1909,6 +1909,34 @@ class TestPermissionHook(unittest.TestCase):
             self.assertEqual(self._decide("ls -la /tmp", env), "prompt")
             self.assertEqual(self._decide("java -jar /tmp/random.jar", env), "prompt")
 
+    def test_an_allowed_command_does_not_carry_a_chained_one(self):
+        """
+        The allow is granted from the first word, so a chained tail must never
+        ride along on it: a tail that writes to Play is denied outright, and
+        anything else falls back to the normal prompt.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            env = self._env(root)
+            allowed = f"python3 {root}/plugin/scripts/tools/gate.py"
+            for tail, expected in (
+                (f"&& rm -rf {root}/play/app", "deny"),
+                (f"; rm -rf {root}/play/app", "deny"),
+                (f"| tee {root}/play/app/A.java", "deny"),
+                ("|| curl http://example.com/x.sh", "prompt"),
+                ("&& curl http://example.com/x.sh", "prompt"),
+            ):
+                self.assertEqual(self._decide(f"{allowed} {tail}", env), expected, tail)
+
+    def test_a_chained_write_to_the_play_repo_is_still_denied(self):
+        """Compounding must cost an allow, never buy its way out of a deny."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            env = self._env(root)
+            self.assertEqual(
+                self._decide(f"true && rm -rf {root}/play/app", env), "deny"
+            )
+
     def test_wrapper_token_is_stripped_only_when_configured(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import sys
 from pathlib import Path
@@ -79,7 +80,54 @@ def strip_wrapper(tokens: list[str]) -> list[str]:
     return tokens
 
 
-def touches_play_repo_for_write(tokens: list[str], play_repo: Path | None) -> bool:
+def segments(command: str) -> list[list[str]]:
+    """
+    Split a command line on control operators, then tokenize each part.
+
+    Splitting has to happen on the raw string rather than on ``shlex.split``
+    output, because ``shlex`` does not isolate operators: ``true; rm -rf x``
+    tokenizes as ``['true;', 'rm', ...]`` and ``a|b`` stays a single token.
+    Only a whitespace-surrounded ``&&`` survives as its own token, so a
+    token-level split would catch that one shape and miss the rest.
+
+    Quoting is respected -- the operator inside ``sh -c 'a && b'`` belongs to
+    the quoted argument, not to this command line, so segments are re-joined
+    when a split lands inside an unbalanced quote.
+    """
+    parts = re.split(r"(&&|\|\||;|\||&)", command)
+    out: list[list[str]] = []
+    pending = ""
+    for part in parts:
+        if part in ("&&", "||", ";", "|", "&"):
+            if pending:
+                pending += part  # split landed inside quotes; keep it together
+            continue
+        candidate = pending + part
+        try:
+            tokens = shlex.split(candidate)
+        except ValueError:
+            pending = candidate  # unbalanced quote: needs the next part too
+            continue
+        pending = ""
+        if tokens:
+            out.append(tokens)
+    if pending:
+        try:
+            out.append(shlex.split(pending))
+        except ValueError:
+            pass
+    return out
+
+
+def touches_play_repo_for_write(command: str, play_repo: Path | None) -> bool:
+    """Would any command in this line write inside the read-only Play tree?"""
+    return any(
+        _segment_writes_to_play(strip_wrapper(segment), play_repo)
+        for segment in segments(command)
+    )
+
+
+def _segment_writes_to_play(tokens: list[str], play_repo: Path | None) -> bool:
     """
     Would this command write inside the read-only Play tree?
 
@@ -120,6 +168,26 @@ def touches_play_repo_for_write(tokens: list[str], play_repo: Path | None) -> bo
     return False
 
 
+# Shell metacharacters that chain, background, or substitute a second command.
+# ``>`` and ``>>`` are deliberately absent: redirection is handled as a write
+# below, and denying it is the point.
+CONTROL_OPERATORS = ("&&", "||", ";", "|", "&", "$(", "`", "\n")
+
+
+def is_compound(command: str) -> bool:
+    """
+    Does this command line contain more than one command?
+
+    ``shlex.split`` flattens control operators into ordinary tokens, so a
+    decision made by looking at ``tokens[0]`` would apply to everything chained
+    after it too -- ``python3 <plugin>/scripts/gate.py && rm -rf <play>`` would
+    be allowed on the strength of its first word alone. Allowing a command is
+    only safe when there is exactly one command to allow, so anything compound
+    is handed back to the normal permission prompt.
+    """
+    return any(op in command for op in CONTROL_OPERATORS)
+
+
 def decide(command: str) -> tuple[str, str] | None:
     """Returns (decision, reason), or None to leave the normal prompt alone."""
     try:
@@ -134,13 +202,19 @@ def decide(command: str) -> tuple[str, str] | None:
     play_repo = resolved(os.environ.get("P2SB_PLAY_REPO"))
     spring_repo = resolved(os.environ.get("P2SB_SPRING_REPO"))
 
-    if touches_play_repo_for_write(tokens, play_repo):
+    if touches_play_repo_for_write(command, play_repo):
         return DENY, (
             "The Play repo is read-only for the whole migration. Work in the "
             "Spring repo instead; if you truly cannot proceed without changing "
             "Play source, stop and report that -- it is a halt condition, not "
             "something to work around."
         )
+
+    # Past this point every branch can only *allow*, and allowing a compound
+    # command would allow its tail as well. The deny above is unaffected: a
+    # write to the Play repo is denied whether or not anything is chained to it.
+    if is_compound(command):
+        return None
 
     program = Path(tokens[0]).name
 
