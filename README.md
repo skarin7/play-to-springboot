@@ -1,4 +1,4 @@
-# Play-to-Spring Boot
+# Play-to-Spring Boot migration
 
 A Claude Code plugin that migrates a **Play Framework (Java)** repo to
 **Spring Boot** using four agent roles coordinated through shared state, with
